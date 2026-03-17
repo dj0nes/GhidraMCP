@@ -2243,7 +2243,17 @@ public class GhidraMCPPlugin extends Plugin {
 
     public Program getCurrentProgram() {
         ProgramManager pm = tool.getService(ProgramManager.class);
-        return pm != null ? pm.getCurrentProgram() : null;
+        if (pm != null && pm.getCurrentProgram() != null) {
+            return pm.getCurrentProgram();
+        }
+        // ProgramManager returns null when plugin is loaded via Code Browser
+        // instead of a tool that directly provides ProgramManager. Fall back
+        // to CodeViewerService which is always available in Code Browser.
+        CodeViewerService cvs = tool.getService(CodeViewerService.class);
+        if (cvs != null && cvs.getNavigatable() != null) {
+            return cvs.getNavigatable().getProgram();
+        }
+        return null;
     }
 
     private void sendResponse(HttpExchange exchange, String response) throws IOException {
