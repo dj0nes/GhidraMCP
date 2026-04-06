@@ -6,6 +6,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.Reference;
@@ -44,6 +45,18 @@ import ghidra.program.model.data.Undefined1DataType;
 import ghidra.program.model.data.EnumDataType;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.IntegerDataType;
+import ghidra.program.model.data.UnsignedIntegerDataType;
+import ghidra.program.model.data.ShortDataType;
+import ghidra.program.model.data.UnsignedShortDataType;
+import ghidra.program.model.data.CharDataType;
+import ghidra.program.model.data.UnsignedCharDataType;
+import ghidra.program.model.data.LongLongDataType;
+import ghidra.program.model.data.UnsignedLongLongDataType;
+import ghidra.program.model.data.FloatDataType;
+import ghidra.program.model.data.DoubleDataType;
+import ghidra.program.model.data.BooleanDataType;
+import ghidra.program.model.data.VoidDataType;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -422,11 +435,42 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
+        server.createContext("/update_struct_field", exchange -> {
+            String body = readRequestBody(exchange);
+            String result = updateStructField(body);
+            sendResponse(exchange, result);
+        });
+
         server.createContext("/apply_struct", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String structName = params.get("struct_name");
             String result = applyStruct(address, structName);
+            sendResponse(exchange, result);
+        });
+
+        server.createContext("/create_function", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String name = params.get("name");
+            String result = createFunctionAtAddress(address, name);
+            sendResponse(exchange, result);
+        });
+
+        // Set (or rename) the primary label at an address, deleting all other labels there first.
+        // POST params: address, name
+        server.createContext("/set_primary_label", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String name = params.get("name");
+            String result = setPrimaryLabel(address, name);
+            sendResponse(exchange, result);
+        });
+
+        // Batch version: JSON array of {address, name} objects — all done in one transaction.
+        server.createContext("/batch_set_primary_labels", exchange -> {
+            String body = readRequestBody(exchange);
+            String result = batchSetPrimaryLabels(body);
             sendResponse(exchange, result);
         });
 
@@ -1522,7 +1566,7 @@ public class GhidraMCPPlugin extends Plugin {
 
             // Special case for PVOID
             if (baseTypeName.equals("VOID")) {
-                return new PointerDataType(dtm.getDataType("/void"));
+                return new PointerDataType(new VoidDataType(dtm));
             }
 
             // Try to find the base type
@@ -1532,50 +1576,50 @@ public class GhidraMCPPlugin extends Plugin {
             }
 
             Msg.warn(this, "Base type not found for " + typeName + ", defaulting to void*");
-            return new PointerDataType(dtm.getDataType("/void"));
+            return new PointerDataType(new VoidDataType(dtm));
         }
 
-        // Handle common built-in types
+        // Handle common built-in types using concrete classes (avoids dtm path lookup failures)
         switch (typeName.toLowerCase()) {
             case "int":
             case "long":
-                return dtm.getDataType("/int");
+                return new IntegerDataType(dtm);
             case "uint":
             case "unsigned int":
             case "unsigned long":
             case "dword":
-                return dtm.getDataType("/uint");
+                return new UnsignedIntegerDataType(dtm);
             case "short":
-                return dtm.getDataType("/short");
+                return new ShortDataType(dtm);
             case "ushort":
             case "unsigned short":
             case "word":
-                return dtm.getDataType("/ushort");
+                return new UnsignedShortDataType(dtm);
             case "char":
             case "byte":
-                return dtm.getDataType("/char");
+                return new CharDataType(dtm);
             case "uchar":
             case "unsigned char":
-                return dtm.getDataType("/uchar");
+                return new UnsignedCharDataType(dtm);
             case "longlong":
             case "__int64":
-                return dtm.getDataType("/longlong");
+                return new LongLongDataType(dtm);
             case "ulonglong":
             case "unsigned __int64":
-                return dtm.getDataType("/ulonglong");
+                return new UnsignedLongLongDataType(dtm);
             case "float":
-                return dtm.getDataType("/float");
+                return new FloatDataType(dtm);
             case "double":
-                return dtm.getDataType("/double");
+                return new DoubleDataType(dtm);
             case "qword":
-                return dtm.getDataType("/longlong");
+                return new LongLongDataType(dtm);
             case "pointer":
-                return new PointerDataType();
+                return new PointerDataType(dtm);
             case "bool":
             case "boolean":
-                return dtm.getDataType("/bool");
+                return new BooleanDataType(dtm);
             case "void":
-                return dtm.getDataType("/void");
+                return new VoidDataType(dtm);
             default:
                 // Try as a direct path
                 DataType directType = dtm.getDataType("/" + typeName);
@@ -1585,7 +1629,7 @@ public class GhidraMCPPlugin extends Plugin {
 
                 // Fallback to int if we couldn't find it
                 Msg.warn(this, "Unknown type: " + typeName + ", defaulting to int");
-                return dtm.getDataType("/int");
+                return new IntegerDataType(dtm);
         }
     }
     
@@ -2093,6 +2137,66 @@ public class GhidraMCPPlugin extends Plugin {
         return result.get();
     }
 
+    private String updateStructField(String jsonBody) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (jsonBody == null || jsonBody.isEmpty()) return "JSON body is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to update struct field");
+
+        try {
+            JsonObject body = JsonParser.parseString(jsonBody).getAsJsonObject();
+            String structName = body.get("struct_name").getAsString();
+            String fieldName = body.get("field_name").getAsString();
+            String newType = body.get("new_type").getAsString();
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Update struct field");
+                boolean success = false;
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType existing = findDataTypeByNameInAllCategories(dtm, structName);
+                    if (existing == null || !(existing instanceof ghidra.program.model.data.Structure)) {
+                        result.set("Struct '" + structName + "' not found");
+                        return;
+                    }
+                    ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) existing;
+                    ghidra.program.model.data.DataTypeComponent[] comps = struct.getDefinedComponents();
+                    int targetIdx = -1;
+                    int targetOffset = -1;
+                    int targetLen = -1;
+                    for (ghidra.program.model.data.DataTypeComponent comp : comps) {
+                        if (fieldName.equals(comp.getFieldName())) {
+                            targetIdx = comp.getOrdinal();
+                            targetOffset = comp.getOffset();
+                            targetLen = comp.getLength();
+                            break;
+                        }
+                    }
+                    if (targetIdx < 0) {
+                        result.set("Field '" + fieldName + "' not found in struct '" + structName + "'");
+                        return;
+                    }
+                    DataType newDt = resolveDataType(dtm, newType);
+                    struct.replace(targetIdx, newDt, newDt.getLength(), fieldName, null);
+                    success = true;
+                    result.set("Updated field '" + fieldName + "' in '" + structName +
+                               "' to type '" + newDt.getName() + "' (offset 0x" +
+                               Integer.toHexString(targetOffset) + ", size " + newDt.getLength() + ")");
+                } catch (Exception e) {
+                    Msg.error(this, "Error updating struct field", e);
+                    result.set("Error: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            result.set("Error parsing JSON: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
     private String applyStruct(String addressStr, String structName) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
@@ -2132,6 +2236,62 @@ public class GhidraMCPPlugin extends Plugin {
             });
         } catch (InterruptedException | InvocationTargetException e) {
             Msg.error(this, "Failed to execute apply struct on Swing thread", e);
+        }
+
+        return result.get();
+    }
+
+    private String createFunctionAtAddress(String addressStr, String name) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to create function");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create function at address");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        result.set("Invalid address: " + addressStr);
+                        return;
+                    }
+                    // Check if function already exists
+                    Function existing = program.getFunctionManager().getFunctionAt(addr);
+                    if (existing != null) {
+                        // If a name is provided, rename it
+                        if (name != null && !name.isEmpty()) {
+                            existing.setName(name, SourceType.USER_DEFINED);
+                            result.set("Function already existed at " + addressStr + ", renamed to " + name);
+                        } else {
+                            result.set("Function already exists at " + addressStr + ": " + existing.getName());
+                        }
+                        success = true;
+                        return;
+                    }
+                    // Disassemble at the address first
+                    ghidra.app.util.PseudoDisassembler pd = new ghidra.app.util.PseudoDisassembler(program);
+                    // Create a minimal address set for the function
+                    AddressSet body = new AddressSet(addr, addr);
+                    String funcName = (name != null && !name.isEmpty()) ? name : ("FUN_" + addr.toString());
+                    Function func = program.getFunctionManager().createFunction(
+                        funcName, addr, body, SourceType.USER_DEFINED);
+                    if (func != null) {
+                        result.set("Function created at " + addressStr + " with name " + funcName);
+                        success = true;
+                    } else {
+                        result.set("Failed to create function at " + addressStr);
+                    }
+                } catch (Exception e) {
+                    result.set("Error creating function: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.set("Thread error: " + e.getMessage());
         }
 
         return result.get();
@@ -2263,6 +2423,109 @@ public class GhidraMCPPlugin extends Plugin {
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
         }
+    }
+
+    /**
+     * Batch version of setPrimaryLabel. Accepts a JSON array of {address, name} objects.
+     * All operations run in one Ghidra transaction.
+     */
+    private String batchSetPrimaryLabels(String jsonBody) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (jsonBody == null || jsonBody.isEmpty()) return "JSON body required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Batch set primary labels");
+                int succeeded = 0, failed = 0;
+                StringBuilder errors = new StringBuilder();
+                try {
+                    com.google.gson.JsonArray arr =
+                        com.google.gson.JsonParser.parseString(jsonBody).getAsJsonArray();
+                    SymbolTable symTable = program.getSymbolTable();
+
+                    for (com.google.gson.JsonElement el : arr) {
+                        com.google.gson.JsonObject obj = el.getAsJsonObject();
+                        String addrStr = obj.get("address").getAsString();
+                        String name    = obj.get("name").getAsString();
+                        try {
+                            Address addr = program.getAddressFactory().getAddress(addrStr);
+                            // Delete all existing user-defined labels at this address
+                            for (Symbol sym : symTable.getSymbols(addr)) {
+                                if (sym.getSource() == SourceType.USER_DEFINED) {
+                                    sym.delete();
+                                }
+                            }
+                            symTable.createLabel(addr, name, SourceType.USER_DEFINED);
+                            succeeded++;
+                        } catch (Exception e) {
+                            failed++;
+                            errors.append(addrStr).append(": ").append(e.getMessage()).append("\n");
+                        }
+                    }
+                } catch (Exception e) {
+                    Msg.error(this, "batchSetPrimaryLabels parse error", e);
+                } finally {
+                    program.endTransaction(tx, true);
+                }
+                result.set("Total: " + (succeeded + failed) + ", Succeeded: " + succeeded +
+                    ", Failed: " + failed +
+                    (errors.length() > 0 ? "\nErrors:\n" + errors : ""));
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            Msg.error(this, "Failed to execute batch_set_primary_labels on Swing thread", e);
+        }
+
+        return result.get();
+    }
+
+    /**
+     * Set the primary label at an address to the given name.
+     * All existing labels at that address are deleted first, then the new name is created as primary.
+     * POST params: address, name
+     */
+    private String setPrimaryLabel(String addressStr, String name) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (name == null || name.isEmpty()) return "Name is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to set primary label");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Set primary label");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    SymbolTable symTable = program.getSymbolTable();
+
+                    // Delete all existing user-defined labels at this address
+                    Symbol[] symbols = symTable.getSymbols(addr);
+                    for (Symbol sym : symbols) {
+                        if (sym.getSource() == SourceType.USER_DEFINED) {
+                            sym.delete();
+                        }
+                    }
+
+                    // Create the new primary label
+                    symTable.createLabel(addr, name, SourceType.USER_DEFINED);
+                    success = true;
+                    result.set("Primary label '" + name + "' set at " + addr);
+                } catch (Exception e) {
+                    Msg.error(this, "Error setting primary label", e);
+                    result.set("Error: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            Msg.error(this, "Failed to execute set_primary_label on Swing thread", e);
+        }
+
+        return result.get();
     }
 
     @Override
