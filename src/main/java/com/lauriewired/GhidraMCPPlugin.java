@@ -474,6 +474,15 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
+        server.createContext("/rename_variable", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String functionAddress = params.get("function_address");
+            String oldName = params.get("old_name");
+            String newName = params.get("new_name");
+            String result = renameVariableByAddress(functionAddress, oldName, newName);
+            sendResponse(exchange, result);
+        });
+
         server.setExecutor(null);
         new Thread(() -> {
             try {
@@ -794,6 +803,96 @@ public class GhidraMCPPlugin extends Plugin {
             return errorMsg;
         }
         return successFlag.get() ? "Variable renamed" : "Failed to rename variable";
+    }
+
+    private String renameVariableByAddress(String functionAddressStr, String oldVarName, String newVarName) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (functionAddressStr == null || functionAddressStr.isEmpty()) return "function_address is required";
+        if (oldVarName == null || oldVarName.isEmpty()) return "old_name is required";
+        if (newVarName == null || newVarName.isEmpty()) return "new_name is required";
+
+        Address addr;
+        try {
+            addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(functionAddressStr);
+        } catch (Exception e) {
+            return "Invalid address: " + functionAddressStr;
+        }
+
+        Function func = program.getListing().getFunctionAt(addr);
+        if (func == null) {
+            return "No function at address: " + functionAddressStr;
+        }
+
+        DecompInterface decomp = new DecompInterface();
+        decomp.openProgram(program);
+        decomp.setSimplificationStyle("decompile");
+
+        DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+        if (result == null || !result.decompileCompleted()) {
+            return "Decompilation failed";
+        }
+
+        HighFunction highFunction = result.getHighFunction();
+        if (highFunction == null) {
+            return "Decompilation failed (no high function)";
+        }
+
+        LocalSymbolMap localSymbolMap = highFunction.getLocalSymbolMap();
+        if (localSymbolMap == null) {
+            return "Decompilation failed (no local symbol map)";
+        }
+
+        HighSymbol highSymbol = null;
+        Iterator<HighSymbol> symbols = localSymbolMap.getSymbols();
+        while (symbols.hasNext()) {
+            HighSymbol symbol = symbols.next();
+            String symbolName = symbol.getName();
+            if (symbolName.equals(oldVarName)) {
+                highSymbol = symbol;
+            }
+            if (symbolName.equals(newVarName)) {
+                return "Error: A variable named '" + newVarName + "' already exists in this function";
+            }
+        }
+
+        if (highSymbol == null) {
+            return "Variable '" + oldVarName + "' not found in function at " + functionAddressStr;
+        }
+
+        boolean commitRequired = checkFullCommit(highSymbol, highFunction);
+
+        final HighSymbol finalHighSymbol = highSymbol;
+        final Function finalFunction = func;
+        AtomicBoolean successFlag = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Rename variable by address");
+                try {
+                    if (commitRequired) {
+                        HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,
+                            ReturnCommitOption.NO_COMMIT, finalFunction.getSignatureSource());
+                    }
+                    HighFunctionDBUtil.updateDBVariable(
+                        finalHighSymbol,
+                        newVarName,
+                        null,
+                        SourceType.USER_DEFINED
+                    );
+                    successFlag.set(true);
+                } catch (Exception e) {
+                    Msg.error(this, "Failed to rename variable by address", e);
+                } finally {
+                    program.endTransaction(tx, successFlag.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            String errorMsg = "Failed to execute rename on Swing thread: " + e.getMessage();
+            Msg.error(this, errorMsg, e);
+            return errorMsg;
+        }
+        return successFlag.get() ? "Variable renamed successfully" : "Failed to rename variable";
     }
 
     /**
