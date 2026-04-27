@@ -408,6 +408,22 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
+        // Batch version of /renameData: JSON array of {address, new_name} objects.
+        server.createContext("/batch_rename_data", exchange -> {
+            String body = readRequestBody(exchange);
+            String result = batchRenameData(body);
+            sendResponse(exchange, result);
+        });
+
+        // Batch version of /create_function: JSON array of {address, name?} objects.
+        // Each entry becomes a USER_DEFINED function; if a function already exists at the
+        // address and `name` is provided, it is renamed instead.
+        server.createContext("/batch_create_function", exchange -> {
+            String body = readRequestBody(exchange);
+            String result = batchCreateFunction(body);
+            sendResponse(exchange, result);
+        });
+
         server.createContext("/batch_set_comments", exchange -> {
             String body = readRequestBody(exchange);
             String result = batchSetComments(body);
@@ -2026,6 +2042,144 @@ public class GhidraMCPPlugin extends Plugin {
                               (errors.length() > 0 ? "\nErrors:\n" + errors : ""));
                 } catch (Exception e) {
                     Msg.error(this, "Error in batch rename", e);
+                    result.set("Error in batch: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            result.set("Error parsing JSON: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
+    private String batchRenameData(String jsonBody) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (jsonBody == null || jsonBody.isEmpty()) return "JSON body is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to batch rename data");
+
+        try {
+            JsonArray items = JsonParser.parseString(jsonBody).getAsJsonArray();
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Batch rename data");
+                boolean success = false;
+                int succeeded = 0;
+                int failed = 0;
+                StringBuilder errors = new StringBuilder();
+
+                try {
+                    SymbolTable symTable = program.getSymbolTable();
+
+                    for (JsonElement el : items) {
+                        JsonObject item = el.getAsJsonObject();
+                        String addrStr = item.get("address").getAsString();
+                        String newName = item.get("new_name").getAsString();
+
+                        try {
+                            Address addr = program.getAddressFactory().getAddress(addrStr);
+                            Symbol symbol = symTable.getPrimarySymbol(addr);
+                            if (symbol != null) {
+                                symbol.setName(newName, SourceType.USER_DEFINED);
+                            } else {
+                                symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
+                            }
+                            succeeded++;
+                        } catch (Exception e) {
+                            failed++;
+                            errors.append(addrStr).append(": ").append(e.getMessage()).append("\n");
+                        }
+                    }
+
+                    success = succeeded > 0;
+                    result.set("Total: " + items.size() + ", Succeeded: " + succeeded +
+                              ", Failed: " + failed +
+                              (errors.length() > 0 ? "\nErrors:\n" + errors : ""));
+                } catch (Exception e) {
+                    Msg.error(this, "Error in batch rename data", e);
+                    result.set("Error in batch: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            result.set("Error parsing JSON: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
+    private String batchCreateFunction(String jsonBody) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (jsonBody == null || jsonBody.isEmpty()) return "JSON body is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to batch create functions");
+
+        try {
+            JsonArray items = JsonParser.parseString(jsonBody).getAsJsonArray();
+
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Batch create functions");
+                boolean success = false;
+                int created = 0;
+                int renamed = 0;
+                int failed = 0;
+                StringBuilder errors = new StringBuilder();
+
+                try {
+                    for (JsonElement el : items) {
+                        JsonObject item = el.getAsJsonObject();
+                        String addrStr = item.get("address").getAsString();
+                        String name = item.has("name") && !item.get("name").isJsonNull()
+                                ? item.get("name").getAsString() : null;
+
+                        try {
+                            Address addr = program.getAddressFactory().getAddress(addrStr);
+                            if (addr == null) {
+                                failed++;
+                                errors.append(addrStr).append(": Invalid address\n");
+                                continue;
+                            }
+                            Function existing = program.getFunctionManager().getFunctionAt(addr);
+                            if (existing != null) {
+                                if (name != null && !name.isEmpty()) {
+                                    existing.setName(name, SourceType.USER_DEFINED);
+                                    renamed++;
+                                } else {
+                                    // Treat "already exists, no rename requested" as success.
+                                    renamed++;
+                                }
+                                continue;
+                            }
+                            AddressSet body = new AddressSet(addr, addr);
+                            String funcName = (name != null && !name.isEmpty())
+                                    ? name : ("FUN_" + addr.toString());
+                            Function func = program.getFunctionManager().createFunction(
+                                    funcName, addr, body, SourceType.USER_DEFINED);
+                            if (func != null) {
+                                created++;
+                            } else {
+                                failed++;
+                                errors.append(addrStr).append(": createFunction returned null\n");
+                            }
+                        } catch (Exception e) {
+                            failed++;
+                            errors.append(addrStr).append(": ").append(e.getMessage()).append("\n");
+                        }
+                    }
+
+                    success = (created + renamed) > 0;
+                    result.set("Total: " + items.size() +
+                              ", Created: " + created +
+                              ", Already-existed: " + renamed +
+                              ", Failed: " + failed +
+                              (errors.length() > 0 ? "\nErrors:\n" + errors : ""));
+                } catch (Exception e) {
+                    Msg.error(this, "Error in batch create functions", e);
                     result.set("Error in batch: " + e.getMessage());
                 } finally {
                     program.endTransaction(tx, success);
