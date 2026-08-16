@@ -413,6 +413,14 @@ def apply_struct(address: str, struct_name: str) -> str:
     """
     return safe_post("apply_struct", {"address": address, "struct_name": struct_name})
 
+@mcp.tool()
+def delete_data_type(name: str) -> str:
+    """
+    Delete a struct, enum, or other data type from the program's type manager.
+    Anything already applied in the listing reverts to undefined bytes.
+    """
+    return safe_post("delete_data_type", {"name": name})
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,

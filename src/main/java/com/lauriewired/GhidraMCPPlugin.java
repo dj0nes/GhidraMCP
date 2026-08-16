@@ -457,6 +457,12 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
+        server.createContext("/delete_data_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String result = deleteDataType(params.get("name"));
+            sendResponse(exchange, result);
+        });
+
         server.createContext("/apply_struct", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
@@ -2452,6 +2458,48 @@ public class GhidraMCPPlugin extends Plugin {
             });
         } catch (Exception e) {
             result.set("Error parsing JSON: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
+    private String deleteDataType(String name) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Data type name is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to delete data type");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Delete data type");
+                boolean success = false;
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dt = findDataTypeByNameInAllCategories(dtm, name);
+                    if (dt == null) {
+                        result.set("Data type '" + name + "' not found");
+                        return;
+                    }
+                    // Anything already applied in the listing reverts to undefined,
+                    // so say what the caller is about to lose rather than just "ok".
+                    String path = dt.getPathName();
+                    if (dtm.remove(dt, TaskMonitor.DUMMY)) {
+                        success = true;
+                        result.set("Deleted data type '" + path + "'");
+                    }
+                    else {
+                        result.set("Data type '" + path + "' could not be removed");
+                    }
+                } catch (Exception e) {
+                    Msg.error(this, "Error deleting data type", e);
+                    result.set("Error: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            result.set("Error: " + e.getMessage());
         }
 
         return result.get();
