@@ -69,6 +69,7 @@ app_props="$GHIDRA_INSTALL_DIR/Ghidra/application.properties"
 GHIDRA_VERSION="$(ghidra_prop "$app_props" application.version)"
 GHIDRA_RELEASE="$(ghidra_prop "$app_props" application.release.name)"
 GHIDRA_JAVA_MIN="$(ghidra_prop "$app_props" application.java.min)"
+GHIDRA_JAVA_COMPILER="$(ghidra_prop "$app_props" application.java.compiler)"
 [ -n "$GHIDRA_VERSION" ] || ghidra_die "could not read application.version from $app_props"
 [ -n "$GHIDRA_RELEASE" ] || GHIDRA_RELEASE=PUBLIC
 
@@ -77,4 +78,4 @@ GHIDRA_USER_DIR="$(ghidra_user_root)/$GHIDRA_DIST"
 GHIDRA_EXT_DIR="$GHIDRA_USER_DIR/Extensions"
 
 export GHIDRA_INSTALL_DIR GHIDRA_VERSION GHIDRA_RELEASE GHIDRA_DIST \
-       GHIDRA_JAVA_MIN GHIDRA_USER_DIR GHIDRA_EXT_DIR
+       GHIDRA_JAVA_MIN GHIDRA_JAVA_COMPILER GHIDRA_USER_DIR GHIDRA_EXT_DIR

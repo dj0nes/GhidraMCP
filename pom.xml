@@ -18,6 +18,9 @@
          -Dghidra.version, so a plain `mvn package` deliberately produces an
          unloadable zip rather than a silently wrong one. -->
     <ghidra.version>UNSET-use-scripts-build.sh</ghidra.version>
+    <!-- Ghidra's own application.java.compiler; scripts/build.sh overrides this
+         with the value from the install being built against. -->
+    <maven.compiler.release>21</maven.compiler.release>
   </properties>
 
   <dependencies>

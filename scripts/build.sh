@@ -40,7 +40,9 @@ if [ -n "${GHIDRA_JAVA_MIN:-}" ]; then
 fi
 
 cd "$root"
-mvn -Dghidra.version="$GHIDRA_VERSION" clean package "$@"
+mvn -Dghidra.version="$GHIDRA_VERSION" \
+    ${GHIDRA_JAVA_COMPILER:+-Dmaven.compiler.release="$GHIDRA_JAVA_COMPILER"} \
+    clean package "$@"
 
 echo
 echo "  jar: target/GhidraMCP.jar"
