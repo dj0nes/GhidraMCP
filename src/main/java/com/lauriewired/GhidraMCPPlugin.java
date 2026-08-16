@@ -2401,7 +2401,12 @@ public class GhidraMCPPlugin extends Plugin {
             JsonObject body = JsonParser.parseString(jsonBody).getAsJsonObject();
             String structName = body.get("struct_name").getAsString();
             String fieldName = body.get("field_name").getAsString();
-            String newType = body.get("new_type").getAsString();
+            // Either may be omitted: retyping and renaming are independent.
+            String newType = body.has("new_type") ? body.get("new_type").getAsString() : null;
+            String newName = body.has("new_name") ? body.get("new_name").getAsString() : null;
+            if (newType == null && newName == null) {
+                return "At least one of new_type or new_name is required";
+            }
 
             SwingUtilities.invokeAndWait(() -> {
                 int tx = program.startTransaction("Update struct field");
@@ -2415,27 +2420,29 @@ public class GhidraMCPPlugin extends Plugin {
                     }
                     ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) existing;
                     ghidra.program.model.data.DataTypeComponent[] comps = struct.getDefinedComponents();
-                    int targetIdx = -1;
-                    int targetOffset = -1;
-                    int targetLen = -1;
+                    ghidra.program.model.data.DataTypeComponent target = null;
                     for (ghidra.program.model.data.DataTypeComponent comp : comps) {
                         if (fieldName.equals(comp.getFieldName())) {
-                            targetIdx = comp.getOrdinal();
-                            targetOffset = comp.getOffset();
-                            targetLen = comp.getLength();
+                            target = comp;
                             break;
                         }
                     }
-                    if (targetIdx < 0) {
+                    if (target == null) {
                         result.set("Field '" + fieldName + "' not found in struct '" + structName + "'");
                         return;
                     }
-                    DataType newDt = resolveDataType(dtm, newType);
-                    struct.replace(targetIdx, newDt, newDt.getLength(), fieldName, null);
+                    int targetOffset = target.getOffset();
+                    // Keep whatever the caller did not ask to change, including the
+                    // field comment, which replace() would otherwise clear.
+                    DataType newDt = (newType != null) ? resolveDataType(dtm, newType) : target.getDataType();
+                    String finalName = (newName != null) ? newName : fieldName;
+                    struct.replace(target.getOrdinal(), newDt, newDt.getLength(), finalName,
+                                   target.getComment());
                     success = true;
                     result.set("Updated field '" + fieldName + "' in '" + structName +
-                               "' to type '" + newDt.getName() + "' (offset 0x" +
-                               Integer.toHexString(targetOffset) + ", size " + newDt.getLength() + ")");
+                               "' -> name '" + finalName + "', type '" + newDt.getName() +
+                               "' (offset 0x" + Integer.toHexString(targetOffset) +
+                               ", size " + newDt.getLength() + ")");
                 } catch (Exception e) {
                     Msg.error(this, "Error updating struct field", e);
                     result.set("Error: " + e.getMessage());
