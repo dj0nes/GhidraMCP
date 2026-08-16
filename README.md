@@ -99,21 +99,50 @@ Another MCP client that supports multiple models on the backend is [5ire](https:
 3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
 
 # Building from Source
-1. Copy the following files from your Ghidra directory to this project's `lib/` directory:
-- `Ghidra/Features/Base/lib/Base.jar`
-- `Ghidra/Features/Decompiler/lib/Decompiler.jar`
-- `Ghidra/Framework/Docking/lib/Docking.jar`
-- `Ghidra/Framework/Generic/lib/Generic.jar`
-- `Ghidra/Framework/Project/lib/Project.jar`
-- `Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling.jar`
-- `Ghidra/Framework/Utility/lib/Utility.jar`
-- `Ghidra/Framework/Gui/lib/Gui.jar`
-2. Build with Maven by running:
 
-`mvn clean package assembly:single`
+The build is tied to one specific Ghidra install: it compiles against that
+install's jars and stamps that install's version into `extension.properties`,
+which Ghidra checks before it will load an extension at all. The scripts in
+`scripts/` read both out of the install so nothing has to be edited by hand
+when you upgrade Ghidra or build on a second machine.
 
-The generated zip file includes the built Ghidra plugin and its resources. These files are required for Ghidra to recognize the new extension.
+```sh
+./scripts/setup-libs.sh          # copy the 9 Ghidra jars into lib/ (once per install)
+./scripts/build.sh               # compile + package, stamped with that install's version
+./scripts/install.sh             # symlink into the per-user extensions dir
+```
 
-- lib/GhidraMCP.jar
-- extensions.properties
-- Module.manifest
+Each script takes an optional install path and otherwise auto-detects one, in
+this order: `$GHIDRA_INSTALL_DIR`, the `lastrun` file Ghidra writes on launch,
+then conventional locations (`/Applications`, `/opt`, `$HOME`). To target a
+different install, pass it explicitly:
+
+```sh
+./scripts/setup-libs.sh /opt/ghidra_12.1_PUBLIC
+./scripts/build.sh      /opt/ghidra_12.1_PUBLIC
+./scripts/install.sh    /opt/ghidra_12.1_PUBLIC
+```
+
+`install.sh` symlinks `target/GhidraMCP.jar` and `bridge_mcp_ghidra.py` back to
+the repo, so after the first install the edit loop is `./scripts/build.sh` plus
+a Ghidra restart. Pass `--copy` for a standalone install; that is the default on
+Windows, where symlinks need elevation.
+
+Switching a checkout between Ghidra versions means re-running `setup-libs.sh`,
+since `lib/` holds jars from whichever install you last pointed it at.
+
+## Building without the scripts
+
+`mvn package` on its own deliberately produces an unloadable zip: `ghidraVersion`
+comes from the `ghidra.version` property, which defaults to a placeholder. Pass
+the real version to get a working one, after populating `lib/` yourself:
+
+```sh
+mvn -Dghidra.version=11.4.1 clean package assembly:single
+```
+
+The generated zip contains what Ghidra needs to recognize the extension:
+
+- `GhidraMCP/lib/GhidraMCP.jar`
+- `GhidraMCP/extension.properties`
+- `GhidraMCP/Module.manifest`

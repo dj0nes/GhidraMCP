@@ -16,10 +16,12 @@
     <includeBaseDirectory>false</includeBaseDirectory>
     
     <fileSets>
-        <!-- 1) Copy extension.properties and Module.manifest into the top level 
-               of a folder named GhidraMCP/ (the actual extension folder). -->
+        <!-- 1) Copy extension.properties and Module.manifest into the top level
+               of a folder named GhidraMCP/ (the actual extension folder).
+               Taken from target/classes so extension.properties has already had
+               ${ghidra.version} substituted by resource filtering. -->
         <fileSet>
-            <directory>src/main/resources</directory>
+            <directory>${project.build.outputDirectory}</directory>
             <includes>
                 <include>extension.properties</include>
                 <include>Module.manifest</include>
