@@ -45,7 +45,13 @@ fi
 
 dest="$GHIDRA_EXT_DIR/GhidraMCP"
 if [ -e "$dest" ]; then
-    backup="$dest.bak.$$"
+    # Keep the backup OUT of the extensions directory. Ghidra scans every
+    # subdirectory there and parses each one as a module, so a "GhidraMCP.bak.NNN"
+    # left in place is loaded as a second, duplicate extension and reports
+    # manifest errors on every startup.
+    backup_dir="$GHIDRA_EXT_DIR/../GhidraMCP-backups"
+    mkdir -p "$backup_dir"
+    backup="$backup_dir/GhidraMCP.bak.$$"
     mv "$dest" "$backup"
     echo "moved existing install to $backup"
 fi
