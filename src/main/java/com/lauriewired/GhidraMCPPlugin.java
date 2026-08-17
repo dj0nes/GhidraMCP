@@ -23,6 +23,8 @@ import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.services.CodeViewerService;
 import ghidra.app.services.ProgramManager;
 import ghidra.app.util.PseudoDisassembler;
+import ghidra.app.cmd.disassemble.DisassembleCommand;
+import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.cmd.function.SetVariableNameCmd;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.listing.LocalVariableImpl;
@@ -2579,18 +2581,27 @@ public class GhidraMCPPlugin extends Plugin {
                         success = true;
                         return;
                     }
-                    // Disassemble at the address first
-                    ghidra.app.util.PseudoDisassembler pd = new ghidra.app.util.PseudoDisassembler(program);
-                    // Create a minimal address set for the function
-                    AddressSet body = new AddressSet(addr, addr);
-                    String funcName = (name != null && !name.isEmpty()) ? name : ("FUN_" + addr.toString());
-                    Function func = program.getFunctionManager().createFunction(
-                        funcName, addr, body, SourceType.USER_DEFINED);
-                    if (func != null) {
-                        result.set("Function created at " + addressStr + " with name " + funcName);
+                    // Actually disassemble first. Previously this constructed a
+                    // PseudoDisassembler, discarded it, and created the function with a
+                    // one-byte AddressSet body -- yielding a degenerate function that
+                    // decompiles to nothing and has to be deleted by hand.
+                    if (program.getListing().getInstructionAt(addr) == null) {
+                        DisassembleCommand disCmd = new DisassembleCommand(addr, null, true);
+                        if (!disCmd.applyTo(program, TaskMonitor.DUMMY)) {
+                            result.set("Failed to disassemble at " + addressStr + ": " + disCmd.getStatusMsg());
+                            return;
+                        }
+                    }
+                    // CreateFunctionCmd follows the disassembled flow to compute the real body.
+                    String funcName = (name != null && !name.isEmpty()) ? name : null;
+                    CreateFunctionCmd cmd = new CreateFunctionCmd(funcName, addr, null, SourceType.USER_DEFINED);
+                    if (cmd.applyTo(program, TaskMonitor.DUMMY)) {
+                        Function created = program.getFunctionManager().getFunctionAt(addr);
+                        result.set("Function created at " + addressStr + " with name "
+                            + (created != null ? created.getName() : String.valueOf(funcName)));
                         success = true;
                     } else {
-                        result.set("Failed to create function at " + addressStr);
+                        result.set("Failed to create function at " + addressStr + ": " + cmd.getStatusMsg());
                     }
                 } catch (Exception e) {
                     result.set("Error creating function: " + e.getMessage());
@@ -2649,7 +2660,10 @@ public class GhidraMCPPlugin extends Plugin {
         String bodyStr = new String(body, StandardCharsets.UTF_8);
         Map<String, String> params = new HashMap<>();
         for (String pair : bodyStr.split("&")) {
-            String[] kv = pair.split("=");
+            // Limit 2: a value may legitimately contain '=' (base64 padding, comment
+            // text, prototypes). Splitting unbounded produced kv.length > 2 and the
+            // pair was silently dropped.
+            String[] kv = pair.split("=", 2);
             if (kv.length == 2) {
                 // URL decode parameter values
                 try {
