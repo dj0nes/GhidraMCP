@@ -43,6 +43,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.ArrayDataType;
 import ghidra.program.model.data.Undefined1DataType;
 import ghidra.program.model.data.EnumDataType;
 import ghidra.program.model.data.StructureDataType;
@@ -479,6 +480,42 @@ public class GhidraMCPPlugin extends Plugin {
             String name = params.get("name");
             String result = createFunctionAtAddress(address, name);
             sendResponse(exchange, result);
+        });
+
+        // Define an array of `count` elements of `data_type` at `address`.
+        // POST params: address, data_type, count, label (optional)
+        server.createContext("/create_array", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String result = createArray(params.get("address"), params.get("data_type"),
+                                        params.get("count"), params.get("label"));
+            sendResponse(exchange, result);
+        });
+
+        // Define an array of pointers -- the shape of a jump/handler table.
+        // Typing one lets auto-analysis follow the indirection and disassemble
+        // every target, which is the only way to reach functions that have no
+        // direct xrefs.
+        // POST params: address, count, label (optional)
+        server.createContext("/create_pointer_array", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String result = createArray(params.get("address"), "pointer",
+                                        params.get("count"), params.get("label"));
+            sendResponse(exchange, result);
+        });
+
+        // Plate comment: the boxed header block above a function in the listing.
+        // POST params: address, comment
+        server.createContext("/set_plate_comment", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            boolean ok = setCommentAtAddress(params.get("address"), params.get("comment"),
+                                             CodeUnit.PLATE_COMMENT, "Set plate comment");
+            sendResponse(exchange, ok ? "Plate comment set successfully" : "Failed to set plate comment");
+        });
+
+        // Persist the program to its project file. Without this, every change made
+        // through this API is lost if Ghidra is closed or restarted.
+        server.createContext("/save_program", exchange -> {
+            sendResponse(exchange, saveProgram());
         });
 
         // Set (or rename) the primary label at an address, deleting all other labels there first.
@@ -2210,8 +2247,7 @@ public class GhidraMCPPlugin extends Plugin {
         try {
             JsonObject body = JsonParser.parseString(jsonBody).getAsJsonObject();
             String commentTypeStr = body.has("comment_type") ? body.get("comment_type").getAsString() : "decompiler";
-            int commentType = "disassembly".equalsIgnoreCase(commentTypeStr)
-                    ? CodeUnit.EOL_COMMENT : CodeUnit.PRE_COMMENT;
+            int commentType = resolveCommentType(commentTypeStr);
             JsonArray comments = body.getAsJsonArray("comments");
 
             SwingUtilities.invokeAndWait(() -> {
@@ -2607,6 +2643,135 @@ public class GhidraMCPPlugin extends Plugin {
                     result.set("Error creating function: " + e.getMessage());
                 } finally {
                     program.endTransaction(tx, success);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.set("Thread error: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
+    /**
+     * Map a comment_type string to a CodeUnit comment constant.
+     * "disassembly"/"eol" -> EOL, "plate" -> PLATE, "post" -> POST,
+     * "repeatable" -> REPEATABLE, anything else -> PRE (the decompiler comment).
+     */
+    private int resolveCommentType(String s) {
+        if (s == null) return CodeUnit.PRE_COMMENT;
+        switch (s.trim().toLowerCase()) {
+            case "disassembly":
+            case "eol":        return CodeUnit.EOL_COMMENT;
+            case "plate":      return CodeUnit.PLATE_COMMENT;
+            case "post":       return CodeUnit.POST_COMMENT;
+            case "repeatable": return CodeUnit.REPEATABLE_COMMENT;
+            default:           return CodeUnit.PRE_COMMENT;
+        }
+    }
+
+    /**
+     * Define an array of `count` elements of `dataTypeName` at `addressStr`.
+     * Pass "pointer" as the type to build a pointer table of the program's
+     * default pointer size.
+     */
+    private String createArray(String addressStr, String dataTypeName, String countStr, String label) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (dataTypeName == null || dataTypeName.isEmpty()) return "Data type is required";
+
+        final int count;
+        try {
+            count = Integer.decode(countStr == null ? "" : countStr.trim());
+        } catch (Exception e) {
+            return "Invalid count: " + countStr;
+        }
+        if (count <= 0) return "Count must be positive, got " + count;
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to create array");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create array");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        result.set("Invalid address: " + addressStr);
+                        return;
+                    }
+
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType elem;
+                    if (dataTypeName.equalsIgnoreCase("pointer") || dataTypeName.equalsIgnoreCase("void *")) {
+                        elem = dtm.getPointer(null);   // default pointer size for the program
+                    } else {
+                        elem = resolveDataType(dtm, dataTypeName);
+                    }
+                    if (elem == null) {
+                        result.set("Unknown data type: " + dataTypeName);
+                        return;
+                    }
+
+                    int elemLen = elem.getLength();
+                    if (elemLen <= 0) {
+                        result.set("Data type has no fixed length: " + dataTypeName);
+                        return;
+                    }
+
+                    ArrayDataType arr = new ArrayDataType(elem, count, elemLen);
+                    Address end = addr.add((long) elemLen * count - 1);
+
+                    // Undefined bytes need no clearing, but an existing DAT_ or array
+                    // would collide. Clear exactly the span the array will occupy.
+                    program.getListing().clearCodeUnits(addr, end, false);
+                    program.getListing().createData(addr, arr);
+
+                    if (label != null && !label.isEmpty()) {
+                        program.getSymbolTable().createLabel(addr, label, SourceType.USER_DEFINED);
+                    }
+
+                    success = true;
+                    result.set("Created " + elem.getName() + "[" + count + "] at " + addr
+                        + " (" + (elemLen * count) + " bytes, " + addr + " - " + end + ")"
+                        + (label != null && !label.isEmpty() ? " with label " + label : ""));
+                } catch (Exception e) {
+                    Msg.error(this, "Error creating array", e);
+                    result.set("Error creating array: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.set("Thread error: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
+    /**
+     * Persist the program to its project file. Everything this API changes lives
+     * only in memory until this runs.
+     */
+    private String saveProgram() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to save program");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                try {
+                    ghidra.framework.model.DomainFile df = program.getDomainFile();
+                    if (df == null) {
+                        result.set("Program has no project file to save to");
+                        return;
+                    }
+                    df.save(TaskMonitor.DUMMY);
+                    result.set("Saved " + program.getName() + " to " + df.getPathname());
+                } catch (Exception e) {
+                    Msg.error(this, "Error saving program", e);
+                    result.set("Error saving program: " + e.getMessage());
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
