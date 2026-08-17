@@ -482,6 +482,15 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
+        // Remove a function definition. The instructions and data are untouched --
+        // only the function object goes away. Needed to clear a degenerate or
+        // wrongly-bounded function before redefining a routine properly.
+        // POST params: address
+        server.createContext("/delete_function", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            sendResponse(exchange, deleteFunctionAt(params.get("address")));
+        });
+
         // Define an array of `count` elements of `data_type` at `address`.
         // POST params: address, data_type, count, label (optional)
         server.createContext("/create_array", exchange -> {
@@ -1308,8 +1317,12 @@ public class GhidraMCPPlugin extends Plugin {
 
             Msg.info(this, "Setting prototype for function " + func.getName() + ": " + prototype);
 
-            // Store original prototype as a comment for reference
-            addPrototypeComment(program, func, prototype);
+            // Deliberately no plate comment here. This used to write
+            // PLATE_COMMENT = "Setting prototype: <sig>" unconditionally, which
+            // OVERWRITES any existing plate comment -- silently destroying
+            // hand-written function documentation as a side effect of setting a
+            // signature. The prototype is already visible in the signature line,
+            // so the comment was redundant as well as destructive.
 
             // Use ApplyFunctionSignatureCmd to parse and apply the signature
             parseFunctionSignatureAndApply(program, addr, prototype, success, errorMessage);
@@ -1318,22 +1331,6 @@ public class GhidraMCPPlugin extends Plugin {
             String msg = "Error setting function prototype: " + e.getMessage();
             errorMessage.append(msg);
             Msg.error(this, msg, e);
-        }
-    }
-
-    /**
-     * Add a comment showing the prototype being set
-     */
-    private void addPrototypeComment(Program program, Function func, String prototype) {
-        int txComment = program.startTransaction("Add prototype comment");
-        try {
-            program.getListing().setComment(
-                func.getEntryPoint(), 
-                CodeUnit.PLATE_COMMENT, 
-                "Setting prototype: " + prototype
-            );
-        } finally {
-            program.endTransaction(txComment, true);
         }
     }
 
@@ -2641,6 +2638,54 @@ public class GhidraMCPPlugin extends Plugin {
                     }
                 } catch (Exception e) {
                     result.set("Error creating function: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.set("Thread error: " + e.getMessage());
+        }
+
+        return result.get();
+    }
+
+    /**
+     * Remove the function at an address, leaving instructions and data intact.
+     */
+    private String deleteFunctionAt(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to delete function");
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Delete function");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        result.set("Invalid address: " + addressStr);
+                        return;
+                    }
+                    Function func = program.getFunctionManager().getFunctionAt(addr);
+                    if (func == null) {
+                        result.set("No function at " + addressStr);
+                        return;
+                    }
+                    String name = func.getName();
+                    long bodySize = func.getBody().getNumAddresses();
+                    if (program.getFunctionManager().removeFunction(addr)) {
+                        success = true;
+                        result.set("Deleted function " + name + " at " + addressStr
+                                   + " (body was " + bodySize + " byte(s))");
+                    } else {
+                        result.set("removeFunction returned false for " + addressStr);
+                    }
+                } catch (Exception e) {
+                    Msg.error(this, "Error deleting function", e);
+                    result.set("Error deleting function: " + e.getMessage());
                 } finally {
                     program.endTransaction(tx, success);
                 }
