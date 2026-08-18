@@ -2023,9 +2023,24 @@ public class GhidraMCPPlugin extends Plugin {
             sb.append("Size: ").append(data.getLength()).append(" bytes\n");
             sb.append("Value: ").append(data.getDefaultValueRepresentation()).append("\n");
 
-            Symbol[] symbols = program.getSymbolTable().getSymbols(data.getAddress());
-            if (symbols.length > 0) {
-                sb.append("Label: ").append(symbols[0].getName()).append("\n");
+            // Report the PRIMARY symbol, not symbols[0]. getSymbols() returns
+            // creation order, so a secondary label added later would be reported
+            // as though it were the displayed name -- which made a failed
+            // set_primary_label look like it had worked.
+            Symbol primary = program.getSymbolTable().getPrimarySymbol(data.getAddress());
+            if (primary != null) {
+                sb.append("Label: ").append(primary.getName()).append("\n");
+                Symbol[] all = program.getSymbolTable().getSymbols(data.getAddress());
+                if (all.length > 1) {
+                    StringBuilder others = new StringBuilder();
+                    for (Symbol s : all) {
+                        if (s != primary) {
+                            if (others.length() > 0) others.append(", ");
+                            others.append(s.getName());
+                        }
+                    }
+                    sb.append("Other labels: ").append(others).append("\n");
+                }
             }
 
             if ("containing".equals(matchType)) {
@@ -2984,13 +2999,7 @@ public class GhidraMCPPlugin extends Plugin {
                         String name    = obj.get("name").getAsString();
                         try {
                             Address addr = program.getAddressFactory().getAddress(addrStr);
-                            // Delete all existing user-defined labels at this address
-                            for (Symbol sym : symTable.getSymbols(addr)) {
-                                if (sym.getSource() == SourceType.USER_DEFINED) {
-                                    sym.delete();
-                                }
-                            }
-                            symTable.createLabel(addr, name, SourceType.USER_DEFINED);
+                            applyPrimaryLabel(symTable, addr, name);
                             succeeded++;
                         } catch (Exception e) {
                             failed++;
@@ -3018,6 +3027,47 @@ public class GhidraMCPPlugin extends Plugin {
      * All existing labels at that address are deleted first, then the new name is created as primary.
      * POST params: address, name
      */
+    /**
+     * Make `name` the primary label at `addr`.
+     *
+     * Previously this deleted USER_DEFINED labels and called createLabel(). That
+     * silently fails whenever an analysis-generated symbol already owns the
+     * primary slot -- e.g. a `switchdataD_*` jump-table label. Ghidra keeps that
+     * one primary and files the new name as a secondary, so the listing still
+     * shows the old name while the call reports success. Worse, /get_data_at
+     * read symbols[0] (creation order), so a read-back appeared to confirm it.
+     *
+     * Rename the existing primary in place instead, and only create a label when
+     * there is nothing to rename.
+     */
+    private void applyPrimaryLabel(SymbolTable symTable, Address addr, String name)
+            throws Exception {
+        Symbol primary = symTable.getPrimarySymbol(addr);
+
+        // Drop other user-defined labels so only the requested one remains.
+        for (Symbol sym : symTable.getSymbols(addr)) {
+            if (sym != primary && sym.getSource() == SourceType.USER_DEFINED) {
+                sym.delete();
+            }
+        }
+
+        if (primary != null) {
+            if (primary.getSymbolType() == SymbolType.LABEL) {
+                primary.setName(name, SourceType.USER_DEFINED);
+            } else {
+                // A function or other non-label owns the primary slot here; add
+                // the label without trying to displace it.
+                symTable.createLabel(addr, name, SourceType.USER_DEFINED);
+            }
+            return;
+        }
+
+        Symbol created = symTable.createLabel(addr, name, SourceType.USER_DEFINED);
+        if (created != null && !created.isPrimary()) {
+            created.setPrimary();
+        }
+    }
+
     private String setPrimaryLabel(String addressStr, String name) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
@@ -3032,18 +3082,7 @@ public class GhidraMCPPlugin extends Plugin {
                 boolean success = false;
                 try {
                     Address addr = program.getAddressFactory().getAddress(addressStr);
-                    SymbolTable symTable = program.getSymbolTable();
-
-                    // Delete all existing user-defined labels at this address
-                    Symbol[] symbols = symTable.getSymbols(addr);
-                    for (Symbol sym : symbols) {
-                        if (sym.getSource() == SourceType.USER_DEFINED) {
-                            sym.delete();
-                        }
-                    }
-
-                    // Create the new primary label
-                    symTable.createLabel(addr, name, SourceType.USER_DEFINED);
+                    applyPrimaryLabel(program.getSymbolTable(), addr, name);
                     success = true;
                     result.set("Primary label '" + name + "' set at " + addr);
                 } catch (Exception e) {
