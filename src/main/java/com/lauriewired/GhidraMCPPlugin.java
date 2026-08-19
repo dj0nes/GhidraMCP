@@ -161,8 +161,7 @@ public class GhidraMCPPlugin extends Plugin {
 
         server.createContext("/renameData", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            renameDataAtAddress(params.get("address"), params.get("newName"));
-            sendResponse(exchange, "Rename data attempted");
+            sendResponse(exchange, renameDataAtAddress(params.get("address"), params.get("newName")));
         });
 
         server.createContext("/renameVariable", exchange -> {
@@ -752,38 +751,47 @@ public class GhidraMCPPlugin extends Plugin {
         return successFlag.get();
     }
 
-    private void renameDataAtAddress(String addressStr, String newName) {
+    private String renameDataAtAddress(String addressStr, String newName) {
         Program program = getCurrentProgram();
-        if (program == null) return;
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (newName == null || newName.isEmpty()) return "New name is required";
+
+        AtomicReference<String> result = new AtomicReference<>("Failed to rename data");
 
         try {
             SwingUtilities.invokeAndWait(() -> {
                 int tx = program.startTransaction("Rename data");
+                boolean success = false;
                 try {
                     Address addr = program.getAddressFactory().getAddress(addressStr);
-                    Listing listing = program.getListing();
-                    Data data = listing.getDefinedDataAt(addr);
-                    if (data != null) {
-                        SymbolTable symTable = program.getSymbolTable();
-                        Symbol symbol = symTable.getPrimarySymbol(addr);
-                        if (symbol != null) {
-                            symbol.setName(newName, SourceType.USER_DEFINED);
-                        } else {
-                            symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
-                        }
+                    if (addr == null) {
+                        result.set("Invalid address: " + addressStr);
+                        return;
                     }
-                }
-                catch (Exception e) {
+
+                    // Deliberately NOT gated on getDefinedDataAt(). An address
+                    // holding only implicit `undefined` bytes has no Data object,
+                    // yet it can still carry a default DAT_ label -- and
+                    // get_data_at reports that label happily. The old guard made
+                    // this endpoint a SILENT no-op in exactly the case a caller
+                    // most wants it: naming a global that analysis never typed.
+                    // Renaming is a symbol operation; it does not need a Data.
+                    applyPrimaryLabel(program.getSymbolTable(), addr, newName);
+                    success = true;
+                    result.set("Renamed data at " + addr + " to " + newName);
+                } catch (Exception e) {
                     Msg.error(this, "Rename data error", e);
-                }
-                finally {
-                    program.endTransaction(tx, true);
+                    result.set("Error renaming data: " + e.getMessage());
+                } finally {
+                    program.endTransaction(tx, success);
                 }
             });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.set("Thread error: " + e.getMessage());
         }
-        catch (InterruptedException | InvocationTargetException e) {
-            Msg.error(this, "Failed to execute rename data on Swing thread", e);
-        }
+
+        return result.get();
     }
 
     private String renameVariableInFunction(String functionName, String oldVarName, String newVarName) {
