@@ -39,9 +39,15 @@ if [ -n "${GHIDRA_JAVA_MIN:-}" ]; then
     fi
 fi
 
+# Older installs may not publish application.java.compiler. Fall back to the
+# minimum JDK rather than letting the pom default (21) stand -- targeting a
+# newer release than the running JVM produces class files Ghidra cannot load,
+# and that fails at extension-load time, not at build time.
+java_release="${GHIDRA_JAVA_COMPILER:-${GHIDRA_JAVA_MIN:-}}"
+
 cd "$root"
 mvn -Dghidra.version="$GHIDRA_VERSION" \
-    ${GHIDRA_JAVA_COMPILER:+-Dmaven.compiler.release="$GHIDRA_JAVA_COMPILER"} \
+    ${java_release:+-Dmaven.compiler.release="$java_release"} \
     clean package "$@"
 
 echo
