@@ -7,6 +7,7 @@ import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.Reference;
@@ -258,6 +259,8 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
+            String rejected = rejectBlankComment(comment);
+            if (rejected != null) { sendError(exchange, 400, rejected); return; }
             String response = mutating(exchange, () -> setDecompilerComment(address, comment)
                     ? "Comment set successfully" : "Failed to set comment");
             sendResponse(exchange, response);
@@ -267,6 +270,8 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
+            String rejected = rejectBlankComment(comment);
+            if (rejected != null) { sendError(exchange, 400, rejected); return; }
             String response = mutating(exchange, () -> setDisassemblyComment(address, comment)
                     ? "Comment set successfully" : "Failed to set comment");
             sendResponse(exchange, response);
@@ -527,10 +532,36 @@ public class GhidraMCPPlugin extends Plugin {
         // POST params: address, comment
         server.createContext("/set_plate_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
+            String rejected = rejectBlankComment(params.get("comment"));
+            if (rejected != null) { sendError(exchange, 400, rejected); return; }
             String response = mutating(exchange, () -> setCommentAtAddress(params.get("address"), params.get("comment"),
                                              CodeUnit.PLATE_COMMENT, "Set plate comment")
                     ? "Plate comment set successfully" : "Failed to set plate comment");
             sendResponse(exchange, response);
+        });
+
+        // Read every comment at one address. GET params: address
+        server.createContext("/get_comments", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            sendResponse(exchange, getCommentsAt(qparams.get("address")));
+        });
+
+        // List all comments in an address range or function body.
+        // GET params: start+end, or function; offset, limit
+        server.createContext("/list_comments", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit  = parseIntOrDefault(qparams.get("limit"),  100);
+            sendResponse(exchange, listComments(qparams.get("start"), qparams.get("end"),
+                                                qparams.get("function"), offset, limit));
+        });
+
+        // Remove a comment (set it to null). POST params: address, comment_type
+        // (pre|post|eol|plate|repeatable|all)
+        server.createContext("/delete_comment", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String result = mutating(exchange, () -> deleteComment(params.get("address"), params.get("comment_type")));
+            sendResponse(exchange, result);
         });
 
         // Persist the program to its project file. Without this, every change made
@@ -1185,6 +1216,7 @@ public class GhidraMCPPlugin extends Plugin {
         Program program = getCurrentProgram();
         if (program == null) return false;
         if (addressStr == null || addressStr.isEmpty() || comment == null) return false;
+        if (rejectBlankComment(comment) != null) return false; // never store "" (see /delete_comment)
 
         AtomicBoolean success = new AtomicBoolean(false);
 
@@ -2298,6 +2330,13 @@ public class GhidraMCPPlugin extends Plugin {
                         String addr = item.get("address").getAsString();
                         String comment = item.get("comment").getAsString();
 
+                        String rejected = rejectBlankComment(comment);
+                        if (rejected != null) {
+                            failed++;
+                            errors.append(addr).append(": ").append(rejected).append("\n");
+                            continue;
+                        }
+
                         try {
                             Address address = program.getAddressFactory().getAddress(addr);
                             listing.setComment(address, commentType, comment);
@@ -2733,6 +2772,235 @@ public class GhidraMCPPlugin extends Plugin {
         return result.get();
     }
 
+    // ----------------------------------------------------------------------------------
+    // Reading and deleting comments
+    // ----------------------------------------------------------------------------------
+
+    private static final CommentType[] ALL_COMMENT_TYPES = {
+        CommentType.PRE, CommentType.POST, CommentType.EOL, CommentType.PLATE, CommentType.REPEATABLE
+    };
+
+    private static String commentTypeLabel(CommentType t) {
+        return t.name().toLowerCase();
+    }
+
+    /**
+     * Returns an error message if the comment is missing, empty or whitespace-only,
+     * else null. An empty comment is stored by Ghidra as a real (blank) comment and
+     * shows as an empty block in the decompiler; removal goes through /delete_comment.
+     */
+    private String rejectBlankComment(String comment) {
+        if (comment == null) {
+            return "Error: 'comment' parameter is required. To remove a comment use "
+                 + "/delete_comment (address, comment_type=pre|post|eol|plate|repeatable|all).";
+        }
+        if (comment.trim().isEmpty()) {
+            return "Error: refusing to store an empty or whitespace-only comment (it would show as a "
+                 + "blank comment in the listing and decompiler). To remove a comment use "
+                 + "/delete_comment (address, comment_type=pre|post|eol|plate|repeatable|all).";
+        }
+        return null;
+    }
+
+    /** One-line rendering of a comment value, distinguishing absent, empty and blank. */
+    private String describeComment(String c) {
+        if (c == null) return "(none)";
+        String text = "\"" + c.replace("\r", "").replace("\n", "\\n") + "\"";
+        if (c.isEmpty()) return "(EMPTY STRING - a blank comment is stored here; remove it with /delete_comment) " + text;
+        if (c.trim().isEmpty()) return "(WHITESPACE ONLY - remove it with /delete_comment) " + text;
+        return text;
+    }
+
+    private Address parseAddress(Program program, String addressStr) {
+        if (addressStr == null || addressStr.trim().isEmpty()) return null;
+        try {
+            return program.getAddressFactory().getAddress(addressStr.trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Every comment type at one address, each labelled. Function.getComment() and
+     * getRepeatableComment() are stored as the PLATE and REPEATABLE comments at the
+     * function's entry point, so they are not separate comments and are noted rather
+     * than repeated.
+     */
+    private String getCommentsAt(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.trim().isEmpty()) return "Error: address parameter is required";
+        Address addr = parseAddress(program, addressStr);
+        if (addr == null) return "Error: invalid address '" + addressStr + "'";
+
+        Listing listing = program.getListing();
+        StringBuilder sb = new StringBuilder("Comments at ").append(addr).append(":");
+        for (CommentType t : ALL_COMMENT_TYPES) {
+            sb.append("\n  ").append(commentTypeLabel(t)).append(": ")
+              .append(describeComment(listing.getComment(t, addr)));
+        }
+
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        if (func != null) {
+            sb.append("\n  function ").append(func.getName()).append(" starts here; its header comment ")
+              .append("(Function.getComment) is the plate comment above");
+            // Defensive: report it separately only if it ever differs from the plate comment.
+            String fc = func.getComment();
+            if (!Objects.equals(fc, listing.getComment(CommentType.PLATE, addr))) {
+                sb.append("\n  function-header: ").append(describeComment(fc));
+            }
+        } else {
+            Function containing = program.getFunctionManager().getFunctionContaining(addr);
+            if (containing != null) {
+                sb.append("\n  (inside function ").append(containing.getName()).append(" at ")
+                  .append(containing.getEntryPoint()).append(")");
+            }
+        }
+        return sb.toString();
+    }
+
+    /** All comments in a range or function body, one "address type: text" line each, paged. */
+    private String listComments(String startStr, String endStr, String functionStr, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        AddressSet set = new AddressSet();
+        if (functionStr != null && !functionStr.trim().isEmpty()) {
+            Address fa = parseAddress(program, functionStr);
+            if (fa == null) return "Error: invalid function address '" + functionStr + "'";
+            Function f = program.getFunctionManager().getFunctionContaining(fa);
+            if (f == null) return "Error: no function at or containing " + fa;
+            set.add(f.getBody());
+        } else {
+            if (startStr == null || endStr == null) {
+                return "Error: give start and end addresses, or function=<address>";
+            }
+            Address start = parseAddress(program, startStr);
+            Address end = parseAddress(program, endStr);
+            if (start == null) return "Error: invalid start address '" + startStr + "'";
+            if (end == null) return "Error: invalid end address '" + endStr + "'";
+            if (start.compareTo(end) > 0) return "Error: start is after end";
+            set.addRange(start, end);
+        }
+
+        Listing listing = program.getListing();
+        TreeMap<Address, Map<CommentType, String>> found = new TreeMap<>();
+        for (CommentType t : ALL_COMMENT_TYPES) {
+            AddressIterator it = listing.getCommentAddressIterator(t, set, true);
+            while (it.hasNext()) {
+                Address a = it.next();
+                String c = listing.getComment(t, a);
+                if (c != null) {
+                    found.computeIfAbsent(a, k -> new EnumMap<>(CommentType.class)).put(t, c);
+                }
+            }
+        }
+
+        List<String> lines = new ArrayList<>();
+        for (Map.Entry<Address, Map<CommentType, String>> e : found.entrySet()) {
+            for (CommentType t : ALL_COMMENT_TYPES) {
+                String c = e.getValue().get(t);
+                if (c != null) {
+                    lines.add(e.getKey() + " " + commentTypeLabel(t) + ": " + describeComment(c));
+                }
+            }
+        }
+        if (lines.isEmpty()) return "(no comments in range)";
+        return paginateList(lines, offset, limit);
+    }
+
+    /**
+     * Delete one comment type (or all) at an address by setting it to null. Reports what
+     * was removed; when nothing is there no transaction is opened (so nothing is saved).
+     */
+    private String deleteComment(String addressStr, String typeStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.trim().isEmpty()) return "Error: address parameter is required";
+        if (typeStr == null || typeStr.trim().isEmpty()) {
+            return "Error: comment_type is required (pre|post|eol|plate|repeatable|all)";
+        }
+        Address addr = parseAddress(program, addressStr);
+        if (addr == null) return "Error: invalid address '" + addressStr + "'";
+
+        List<CommentType> types = new ArrayList<>();
+        String typeKey = typeStr.trim().toLowerCase();
+        switch (typeKey) {
+            case "all":         types.addAll(Arrays.asList(ALL_COMMENT_TYPES)); break;
+            case "pre":
+            case "decompiler":  types.add(CommentType.PRE); break;
+            case "post":        types.add(CommentType.POST); break;
+            case "eol":
+            case "disassembly": types.add(CommentType.EOL); break;
+            case "plate":       types.add(CommentType.PLATE); break;
+            case "repeatable":  types.add(CommentType.REPEATABLE); break;
+            default:
+                return "Error: unknown comment_type '" + typeStr + "' (use pre|post|eol|plate|repeatable|all)";
+        }
+
+        Listing listing = program.getListing();
+        Map<CommentType, String> existing = new LinkedHashMap<>();
+        for (CommentType t : types) {
+            String c = listing.getComment(t, addr);
+            if (c != null) existing.put(t, c);
+        }
+        if (existing.isEmpty()) {
+            return "Nothing to delete: no " + (typeKey.equals("all") ? "comments" : typeKey + " comment")
+                 + " at " + addr;
+        }
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        AtomicReference<String> error = new AtomicReference<>(null);
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Delete comment");
+                try {
+                    for (CommentType t : existing.keySet()) {
+                        listing.setComment(addr, t, null);
+                    }
+                    // The function header comment is the plate/repeatable comment at the entry
+                    // point, so the loop above already removed it; clear it through the Function
+                    // API too if anything is somehow left.
+                    Function f = program.getFunctionManager().getFunctionAt(addr);
+                    if (f != null) {
+                        if (existing.containsKey(CommentType.PLATE) && f.getComment() != null) f.setComment(null);
+                        if (existing.containsKey(CommentType.REPEATABLE) && f.getRepeatableComment() != null) {
+                            f.setRepeatableComment(null);
+                        }
+                    }
+                    for (CommentType t : existing.keySet()) {
+                        if (listing.getComment(t, addr) != null) {
+                            error.set("Error: " + commentTypeLabel(t) + " comment at " + addr + " could not be removed");
+                            return;
+                        }
+                    }
+                    success.set(true);
+                } catch (Exception e) {
+                    Msg.error(this, "Error deleting comment", e);
+                    error.set("Error deleting comment: " + e.getMessage());
+                } finally {
+                    boolean committed = endTx(program, tx, success.get());
+                    if (success.get() && !committed) {
+                        success.set(false);
+                        error.compareAndSet(null, "Error: transaction was not committed");
+                    }
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            Msg.error(this, "Failed to delete comment on Swing thread", e);
+            return "Error deleting comment: " + e.getMessage();
+        }
+        if (!success.get()) return error.get() != null ? error.get() : "Failed to delete comment";
+
+        StringBuilder sb = new StringBuilder("Deleted at ").append(addr).append(":");
+        for (Map.Entry<CommentType, String> e : existing.entrySet()) {
+            String old = e.getValue();
+            String shown = old.length() > 200 ? old.substring(0, 200) + "..." : old;
+            sb.append("\n  ").append(commentTypeLabel(e.getKey())).append(": ").append(describeComment(shown));
+        }
+        return sb.toString();
+    }
+
     /**
      * Map a comment_type string to a CodeUnit comment constant.
      * "disassembly"/"eol" -> EOL, "plate" -> PLATE, "post" -> POST,
@@ -3064,6 +3332,15 @@ public class GhidraMCPPlugin extends Plugin {
             return cvs.getNavigatable().getProgram();
         }
         return null;
+    }
+
+    private void sendError(HttpExchange exchange, int status, String message) throws IOException {
+        byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 
     private void sendResponse(HttpExchange exchange, String response) throws IOException {

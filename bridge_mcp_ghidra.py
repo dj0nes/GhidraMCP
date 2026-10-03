@@ -221,14 +221,19 @@ def disassemble_function(address: str) -> list:
 @mcp.tool()
 def set_decompiler_comment(address: str, comment: str) -> str:
     """
-    Set a comment for a given address in the function pseudocode.
+    Set a comment for a given address in the function pseudocode (a PRE comment).
+    The comment must contain text: an empty or whitespace-only comment is rejected
+    (it would be stored as a blank comment and show as an empty block). To remove a
+    comment use delete_comment.
     """
     return safe_post("set_decompiler_comment", {"address": address, "comment": comment})
 
 @mcp.tool()
 def set_disassembly_comment(address: str, comment: str) -> str:
     """
-    Set a comment for a given address in the function disassembly.
+    Set a comment for a given address in the function disassembly (an EOL comment).
+    The comment must contain text: an empty or whitespace-only comment is rejected.
+    To remove a comment use delete_comment.
     """
     return safe_post("set_disassembly_comment", {"address": address, "comment": comment})
 
@@ -371,11 +376,56 @@ def batch_rename_functions(renames: list[dict]) -> str:
     return safe_post_json("batch_rename_functions", renames)
 
 @mcp.tool()
+def get_comments(address: str) -> list:
+    """
+    Read every comment at one address: pre, post, eol, plate and repeatable, each
+    labelled. A type with no comment shows "(none)"; a comment stored as an empty
+    string shows "(EMPTY STRING ...)" and a whitespace-only one "(WHITESPACE ONLY ...)",
+    so a blank comment is never mistaken for no comment. At a function's entry point
+    the function header comment is the plate comment (the same stored value), and a
+    note says so.
+    """
+    return safe_get("get_comments", {"address": address})
+
+@mcp.tool()
+def list_comments(start: str = None, end: str = None, function: str = None,
+                  offset: int = 0, limit: int = 100) -> list:
+    """
+    List all comments in an address range or a function body, one line per comment as
+    "<address> <type>: "<text>"", sorted by address. Give either start and end
+    (inclusive), or function (the address of, or any address inside, a function).
+    Empty/whitespace-only comments are flagged. Paged with offset/limit.
+    """
+    params = {"offset": offset, "limit": limit}
+    if function:
+        params["function"] = function
+    else:
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+    return safe_get("list_comments", params)
+
+@mcp.tool()
+def delete_comment(address: str, comment_type: str) -> str:
+    """
+    Delete a comment (sets it to null, which removes it entirely; this is how to remove
+    a blank comment too). comment_type: pre (the decompiler comment), post, eol (the
+    disassembly comment), plate, repeatable, or all. Reports exactly what was deleted,
+    or that nothing was there (in which case nothing is changed or saved). The function
+    header comment is the plate comment at the function's entry point, so
+    comment_type=plate removes it.
+    """
+    return safe_post("delete_comment", {"address": address, "comment_type": comment_type})
+
+@mcp.tool()
 def batch_set_comments(comments: list[dict], comment_type: str = "decompiler") -> str:
     """
     Set multiple comments in one transaction.
     comment_type: "decompiler" (PRE_COMMENT) or "disassembly" (EOL_COMMENT).
     Each comment: {"address": "0x...", "comment": "text"}
+    Entries with an empty or whitespace-only comment are rejected (counted as failed);
+    use delete_comment to remove a comment.
     """
     return safe_post_json("batch_set_comments", {
         "comment_type": comment_type,

@@ -98,6 +98,19 @@ Another MCP client that supports multiple models on the backend is [5ire](https:
 2. Name: GhidraMCP
 3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
 
+# Comments
+
+| Endpoint | Tool | Purpose |
+| --- | --- | --- |
+| `GET /get_comments?address=` | `get_comments` | Every comment type at one address (pre, post, eol, plate, repeatable), each labelled. `(none)` means no comment; `(EMPTY STRING ...)` means a blank comment is stored. |
+| `GET /list_comments?start=&end=` or `?function=` | `list_comments` | All comments in an address range or function body, one `<address> <type>: "<text>"` line each, with `offset`/`limit` paging. |
+| `POST /delete_comment` (`address`, `comment_type`) | `delete_comment` | Remove a comment by setting it to null. `comment_type` is `pre`, `post`, `eol`, `plate`, `repeatable` or `all`. Reports what was deleted, or that nothing was there (no change, no save). |
+| `POST /set_decompiler_comment`, `/set_disassembly_comment`, `/set_plate_comment`, `/batch_set_comments` | `set_*_comment`, `batch_set_comments` | Set a comment. An empty or whitespace-only comment is rejected (HTTP 400, nothing stored or saved), because Ghidra would keep it as a blank comment that renders as an empty block in the decompiler; use `delete_comment` to remove one. |
+
+The function header comment (`Function.getComment`) is stored as the plate
+comment at the function's entry point, so `get_comments` shows it as `plate`
+and `delete_comment` with `comment_type=plate` removes it.
+
 # Auto-save
 
 Every tool that modifies the program saves it to its project file immediately
