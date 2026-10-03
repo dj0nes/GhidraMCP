@@ -43,12 +43,19 @@ def safe_get(endpoint: str, params: dict = None) -> list:
         return [f"Request failed: {str(e)}"]
 
 def safe_post(endpoint: str, data: dict | str) -> str:
+    """
+    Perform a POST request with a form or raw body.
+
+    Endpoints that modify the program save it to disk before replying (the plugin's
+    auto-save), so the timeout leaves room for a save on a large program. The reply
+    ends with "; saved" or "; SAVE FAILED: <reason>" when a change was committed.
+    """
     try:
         url = urljoin(ghidra_server_url, endpoint)
         if isinstance(data, dict):
-            response = requests.post(url, data=data, timeout=5)
+            response = requests.post(url, data=data, timeout=30)
         else:
-            response = requests.post(url, data=data.encode("utf-8"), timeout=5)
+            response = requests.post(url, data=data.encode("utf-8"), timeout=30)
         response.encoding = 'utf-8'
         if response.ok:
             return response.text.strip()
@@ -60,6 +67,9 @@ def safe_post(endpoint: str, data: dict | str) -> str:
 def safe_post_json(endpoint: str, json_data) -> str:
     """
     Perform a POST request with a JSON body.
+
+    As with safe_post, a committed change is saved to disk before the reply and the
+    reply ends with "; saved" or "; SAVE FAILED: <reason>".
     """
     import json
     try:
@@ -420,6 +430,16 @@ def delete_data_type(name: str) -> str:
     Anything already applied in the listing reverts to undefined bytes.
     """
     return safe_post("delete_data_type", {"name": name})
+
+@mcp.tool()
+def save_program() -> str:
+    """
+    Save the current program to its project file. Every tool that modifies the
+    program already saves automatically (the reply ends with "; saved" or
+    "; SAVE FAILED: <reason>"), so this is only needed after changes made outside
+    this API, or when auto-save has been turned off in the plugin's tool options.
+    """
+    return safe_post("save_program", "")
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")

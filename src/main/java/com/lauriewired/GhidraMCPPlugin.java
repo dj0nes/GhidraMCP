@@ -97,6 +97,7 @@ public class GhidraMCPPlugin extends Plugin {
     private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
     private static final String PORT_OPTION_NAME = "Server Port";
     private static final int DEFAULT_PORT = 8080;
+    private static final String AUTOSAVE_OPTION_NAME = "Auto-Save After Changes";
 
     public GhidraMCPPlugin(PluginTool tool) {
         super(tool);
@@ -108,6 +109,11 @@ public class GhidraMCPPlugin extends Plugin {
             null, // No help location for now
             "The network port number the embedded HTTP server will listen on. " +
             "Requires Ghidra restart or plugin reload to take effect after changing.");
+        options.registerOption(AUTOSAVE_OPTION_NAME, true,
+            null,
+            "Save the program to disk immediately after every API call that changes it, " +
+            "so no change lives only in memory. A request can opt out with autosave=false " +
+            "in its query string.");
 
         try {
             startServer();
@@ -154,14 +160,14 @@ public class GhidraMCPPlugin extends Plugin {
 
         server.createContext("/renameFunction", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            String response = renameFunction(params.get("oldName"), params.get("newName"))
-                    ? "Renamed successfully" : "Rename failed";
+            String response = mutating(exchange, () -> renameFunction(params.get("oldName"), params.get("newName"))
+                    ? "Renamed successfully" : "Rename failed");
             sendResponse(exchange, response);
         });
 
         server.createContext("/renameData", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            sendResponse(exchange, renameDataAtAddress(params.get("address"), params.get("newName")));
+            sendResponse(exchange, mutating(exchange, () -> renameDataAtAddress(params.get("address"), params.get("newName"))));
         });
 
         server.createContext("/renameVariable", exchange -> {
@@ -169,7 +175,7 @@ public class GhidraMCPPlugin extends Plugin {
             String functionName = params.get("functionName");
             String oldName = params.get("oldName");
             String newName = params.get("newName");
-            String result = renameVariableInFunction(functionName, oldName, newName);
+            String result = mutating(exchange, () -> renameVariableInFunction(functionName, oldName, newName));
             sendResponse(exchange, result);
         });
 
@@ -252,24 +258,27 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
-            boolean success = setDecompilerComment(address, comment);
-            sendResponse(exchange, success ? "Comment set successfully" : "Failed to set comment");
+            String response = mutating(exchange, () -> setDecompilerComment(address, comment)
+                    ? "Comment set successfully" : "Failed to set comment");
+            sendResponse(exchange, response);
         });
 
         server.createContext("/set_disassembly_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
-            boolean success = setDisassemblyComment(address, comment);
-            sendResponse(exchange, success ? "Comment set successfully" : "Failed to set comment");
+            String response = mutating(exchange, () -> setDisassemblyComment(address, comment)
+                    ? "Comment set successfully" : "Failed to set comment");
+            sendResponse(exchange, response);
         });
 
         server.createContext("/rename_function_by_address", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String functionAddress = params.get("function_address");
             String newName = params.get("new_name");
-            boolean success = renameFunctionByAddress(functionAddress, newName);
-            sendResponse(exchange, success ? "Function renamed successfully" : "Failed to rename function");
+            String response = mutating(exchange, () -> renameFunctionByAddress(functionAddress, newName)
+                    ? "Function renamed successfully" : "Failed to rename function");
+            sendResponse(exchange, response);
         });
 
         server.createContext("/set_function_prototype", exchange -> {
@@ -278,19 +287,20 @@ public class GhidraMCPPlugin extends Plugin {
             String prototype = params.get("prototype");
 
             // Call the set prototype function and get detailed result
-            PrototypeResult result = setFunctionPrototype(functionAddress, prototype);
-
-            if (result.isSuccess()) {
-                // Even with successful operations, include any warning messages for debugging
-                String successMsg = "Function prototype set successfully";
-                if (!result.getErrorMessage().isEmpty()) {
-                    successMsg += "\n\nWarnings/Debug Info:\n" + result.getErrorMessage();
+            String response = mutating(exchange, () -> {
+                PrototypeResult result = setFunctionPrototype(functionAddress, prototype);
+                if (result.isSuccess()) {
+                    // Even with successful operations, include any warning messages for debugging
+                    String successMsg = "Function prototype set successfully";
+                    if (!result.getErrorMessage().isEmpty()) {
+                        successMsg += "\n\nWarnings/Debug Info:\n" + result.getErrorMessage();
+                    }
+                    return successMsg;
                 }
-                sendResponse(exchange, successMsg);
-            } else {
                 // Return the detailed error message to the client
-                sendResponse(exchange, "Failed to set function prototype: " + result.getErrorMessage());
-            }
+                return "Failed to set function prototype: " + result.getErrorMessage();
+            });
+            sendResponse(exchange, response);
         });
 
         server.createContext("/set_local_variable_type", exchange -> {
@@ -326,12 +336,14 @@ public class GhidraMCPPlugin extends Plugin {
             }
 
             // Try to set the type
-            boolean success = setLocalVariableType(functionAddress, variableName, newType);
+            String response = mutating(exchange, () -> {
+                boolean success = setLocalVariableType(functionAddress, variableName, newType);
+                String successMsg = success ? "Variable type set successfully" : "Failed to set variable type";
+                responseMsg.append("\nResult: ").append(successMsg);
+                return responseMsg.toString();
+            });
 
-            String successMsg = success ? "Variable type set successfully" : "Failed to set variable type";
-            responseMsg.append("\nResult: ").append(successMsg);
-
-            sendResponse(exchange, responseMsg.toString());
+            sendResponse(exchange, response);
         });
 
         server.createContext("/xrefs_to", exchange -> {
@@ -370,7 +382,7 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String size = params.get("size");
-            String result = clearData(address, size);
+            String result = mutating(exchange, () -> clearData(address, size));
             sendResponse(exchange, result);
         });
 
@@ -379,13 +391,13 @@ public class GhidraMCPPlugin extends Plugin {
             String address = params.get("address");
             String dataType = params.get("data_type");
             String label = params.get("label");
-            String result = defineData(address, dataType, label);
+            String result = mutating(exchange, () -> defineData(address, dataType, label));
             sendResponse(exchange, result);
         });
 
         server.createContext("/define_data_batch", exchange -> {
             String body = readRequestBody(exchange);
-            String result = defineDataBatch(body);
+            String result = mutating(exchange, () -> defineDataBatch(body));
             sendResponse(exchange, result);
         });
 
@@ -406,14 +418,14 @@ public class GhidraMCPPlugin extends Plugin {
 
         server.createContext("/batch_rename_functions", exchange -> {
             String body = readRequestBody(exchange);
-            String result = batchRenameFunctions(body);
+            String result = mutating(exchange, () -> batchRenameFunctions(body));
             sendResponse(exchange, result);
         });
 
         // Batch version of /renameData: JSON array of {address, new_name} objects.
         server.createContext("/batch_rename_data", exchange -> {
             String body = readRequestBody(exchange);
-            String result = batchRenameData(body);
+            String result = mutating(exchange, () -> batchRenameData(body));
             sendResponse(exchange, result);
         });
 
@@ -422,13 +434,13 @@ public class GhidraMCPPlugin extends Plugin {
         // address and `name` is provided, it is renamed instead.
         server.createContext("/batch_create_function", exchange -> {
             String body = readRequestBody(exchange);
-            String result = batchCreateFunction(body);
+            String result = mutating(exchange, () -> batchCreateFunction(body));
             sendResponse(exchange, result);
         });
 
         server.createContext("/batch_set_comments", exchange -> {
             String body = readRequestBody(exchange);
-            String result = batchSetComments(body);
+            String result = mutating(exchange, () -> batchSetComments(body));
             sendResponse(exchange, result);
         });
 
@@ -437,31 +449,31 @@ public class GhidraMCPPlugin extends Plugin {
             String address = params.get("address");
             String name = params.get("name");
             String namespace = params.get("namespace");
-            String result = createLabel(address, name, namespace);
+            String result = mutating(exchange, () -> createLabel(address, name, namespace));
             sendResponse(exchange, result);
         });
 
         server.createContext("/create_enum", exchange -> {
             String body = readRequestBody(exchange);
-            String result = createEnum(body);
+            String result = mutating(exchange, () -> createEnum(body));
             sendResponse(exchange, result);
         });
 
         server.createContext("/create_struct", exchange -> {
             String body = readRequestBody(exchange);
-            String result = createStruct(body);
+            String result = mutating(exchange, () -> createStruct(body));
             sendResponse(exchange, result);
         });
 
         server.createContext("/update_struct_field", exchange -> {
             String body = readRequestBody(exchange);
-            String result = updateStructField(body);
+            String result = mutating(exchange, () -> updateStructField(body));
             sendResponse(exchange, result);
         });
 
         server.createContext("/delete_data_type", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            String result = deleteDataType(params.get("name"));
+            String result = mutating(exchange, () -> deleteDataType(params.get("name")));
             sendResponse(exchange, result);
         });
 
@@ -469,7 +481,7 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String structName = params.get("struct_name");
-            String result = applyStruct(address, structName);
+            String result = mutating(exchange, () -> applyStruct(address, structName));
             sendResponse(exchange, result);
         });
 
@@ -477,7 +489,7 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String name = params.get("name");
-            String result = createFunctionAtAddress(address, name);
+            String result = mutating(exchange, () -> createFunctionAtAddress(address, name));
             sendResponse(exchange, result);
         });
 
@@ -487,15 +499,15 @@ public class GhidraMCPPlugin extends Plugin {
         // POST params: address
         server.createContext("/delete_function", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            sendResponse(exchange, deleteFunctionAt(params.get("address")));
+            sendResponse(exchange, mutating(exchange, () -> deleteFunctionAt(params.get("address"))));
         });
 
         // Define an array of `count` elements of `data_type` at `address`.
         // POST params: address, data_type, count, label (optional)
         server.createContext("/create_array", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            String result = createArray(params.get("address"), params.get("data_type"),
-                                        params.get("count"), params.get("label"));
+            String result = mutating(exchange, () -> createArray(params.get("address"), params.get("data_type"),
+                                        params.get("count"), params.get("label")));
             sendResponse(exchange, result);
         });
 
@@ -506,8 +518,8 @@ public class GhidraMCPPlugin extends Plugin {
         // POST params: address, count, label (optional)
         server.createContext("/create_pointer_array", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            String result = createArray(params.get("address"), "pointer",
-                                        params.get("count"), params.get("label"));
+            String result = mutating(exchange, () -> createArray(params.get("address"), "pointer",
+                                        params.get("count"), params.get("label")));
             sendResponse(exchange, result);
         });
 
@@ -515,9 +527,10 @@ public class GhidraMCPPlugin extends Plugin {
         // POST params: address, comment
         server.createContext("/set_plate_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
-            boolean ok = setCommentAtAddress(params.get("address"), params.get("comment"),
-                                             CodeUnit.PLATE_COMMENT, "Set plate comment");
-            sendResponse(exchange, ok ? "Plate comment set successfully" : "Failed to set plate comment");
+            String response = mutating(exchange, () -> setCommentAtAddress(params.get("address"), params.get("comment"),
+                                             CodeUnit.PLATE_COMMENT, "Set plate comment")
+                    ? "Plate comment set successfully" : "Failed to set plate comment");
+            sendResponse(exchange, response);
         });
 
         // Persist the program to its project file. Without this, every change made
@@ -532,14 +545,14 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String name = params.get("name");
-            String result = setPrimaryLabel(address, name);
+            String result = mutating(exchange, () -> setPrimaryLabel(address, name));
             sendResponse(exchange, result);
         });
 
         // Batch version: JSON array of {address, name} objects — all done in one transaction.
         server.createContext("/batch_set_primary_labels", exchange -> {
             String body = readRequestBody(exchange);
-            String result = batchSetPrimaryLabels(body);
+            String result = mutating(exchange, () -> batchSetPrimaryLabels(body));
             sendResponse(exchange, result);
         });
 
@@ -548,7 +561,7 @@ public class GhidraMCPPlugin extends Plugin {
             String functionAddress = params.get("function_address");
             String oldName = params.get("old_name");
             String newName = params.get("new_name");
-            String result = renameVariableByAddress(functionAddress, oldName, newName);
+            String result = mutating(exchange, () -> renameVariableByAddress(functionAddress, oldName, newName));
             sendResponse(exchange, result);
         });
 
@@ -741,7 +754,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error renaming function", e);
                 }
                 finally {
-                    successFlag.set(program.endTransaction(tx, successFlag.get()));
+                    successFlag.set(endTx(program, tx, successFlag.get()));
                 }
             });
         }
@@ -784,7 +797,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Rename data error", e);
                     result.set("Error renaming data: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -872,7 +885,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Failed to rename variable", e);
                 }
                 finally {
-                    successFlag.set(program.endTransaction(tx, true));
+                    successFlag.set(endTx(program, tx, successFlag.get()));
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -962,7 +975,7 @@ public class GhidraMCPPlugin extends Plugin {
                 } catch (Exception e) {
                     Msg.error(this, "Failed to rename variable by address", e);
                 } finally {
-                    program.endTransaction(tx, successFlag.get());
+                    endTx(program, tx, successFlag.get());
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -1185,7 +1198,7 @@ public class GhidraMCPPlugin extends Plugin {
                 } catch (Exception e) {
                     Msg.error(this, "Error setting " + transactionName.toLowerCase(), e);
                 } finally {
-                    success.set(program.endTransaction(tx, success.get()));
+                    success.set(endTx(program, tx, success.get()));
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -1273,7 +1286,7 @@ public class GhidraMCPPlugin extends Plugin {
         } catch (Exception e) {
             Msg.error(this, "Error renaming function by address", e);
         } finally {
-            program.endTransaction(tx, success.get());
+            endTx(program, tx, success.get());
         }
     }
 
@@ -1392,7 +1405,7 @@ public class GhidraMCPPlugin extends Plugin {
             errorMessage.append(msg);
             Msg.error(this, msg, e);
         } finally {
-            program.endTransaction(txProto, success.get());
+            endTx(program, txProto, success.get());
         }
     }
 
@@ -1536,7 +1549,7 @@ public class GhidraMCPPlugin extends Plugin {
         } catch (Exception e) {
             Msg.error(this, "Error setting variable type: " + e.getMessage());
         } finally {
-            program.endTransaction(tx, success.get());
+            endTx(program, tx, success.get());
         }
     }
 
@@ -1871,7 +1884,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error clearing data", e);
                     result.set("Error clearing data: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -1911,7 +1924,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error defining data", e);
                     result.set("Error defining data: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -1972,7 +1985,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error in define data batch", e);
                     result.set("Error in batch: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2109,7 +2122,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error in batch rename", e);
                     result.set("Error in batch: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2167,7 +2180,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error in batch rename data", e);
                     result.set("Error in batch: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2247,7 +2260,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error in batch create functions", e);
                     result.set("Error in batch: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2303,7 +2316,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error in batch set comments", e);
                     result.set("Error in batch: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2349,7 +2362,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error creating label", e);
                     result.set("Error creating label: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -2393,7 +2406,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error creating enum", e);
                     result.set("Error creating enum: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2444,7 +2457,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error creating struct", e);
                     result.set("Error creating struct: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2511,7 +2524,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error updating struct field", e);
                     result.set("Error: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2553,7 +2566,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error deleting data type", e);
                     result.set("Error: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (Exception e) {
@@ -2597,7 +2610,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error applying struct", e);
                     result.set("Error applying struct: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -2662,7 +2675,7 @@ public class GhidraMCPPlugin extends Plugin {
                 } catch (Exception e) {
                     result.set("Error creating function: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -2710,7 +2723,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error deleting function", e);
                     result.set("Error deleting function: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -2807,7 +2820,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error creating array", e);
                     result.set("Error creating array: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
@@ -2818,13 +2831,20 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * Persist the program to its project file. Everything this API changes lives
-     * only in memory until this runs.
+     * Persist the program to its project file. Auto-save (see mutating()) does this
+     * after every change; this stays available as an explicit endpoint.
      */
     private String saveProgram() {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
+        return saveProgramNow(program, new AtomicBoolean(false));
+    }
 
+    /**
+     * Save the given program on the Swing thread. `ok` is set true only if the save
+     * succeeded; the return value is the human-readable outcome either way.
+     */
+    private String saveProgramNow(Program program, AtomicBoolean ok) {
         AtomicReference<String> result = new AtomicReference<>("Failed to save program");
 
         try {
@@ -2836,6 +2856,7 @@ public class GhidraMCPPlugin extends Plugin {
                         return;
                     }
                     df.save(TaskMonitor.DUMMY);
+                    ok.set(true);
                     result.set("Saved " + program.getName() + " to " + df.getPathname());
                 } catch (Exception e) {
                     Msg.error(this, "Error saving program", e);
@@ -2847,6 +2868,80 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         return result.get();
+    }
+
+    // ----------------------------------------------------------------------------------
+    // Auto-save: every endpoint that modifies the program goes through mutating().
+    // ----------------------------------------------------------------------------------
+
+    /** Serializes mutating requests so the committed-program tracking below is per request. */
+    private final Object mutationLock = new Object();
+
+    /** Programs that had a transaction committed during the current mutating() call. */
+    private final Set<Program> committedPrograms = Collections.synchronizedSet(new LinkedHashSet<>());
+
+    /**
+     * End a transaction. Every transaction in this plugin ends here, so this is the
+     * single place that learns a change was actually committed. The save itself is
+     * deferred to mutating(), which runs it only once the transaction is closed.
+     */
+    private boolean endTx(Program program, int tx, boolean commit) {
+        boolean committed = program.endTransaction(tx, commit);
+        if (commit && committed) {
+            committedPrograms.add(program);
+        }
+        return committed;
+    }
+
+    /**
+     * Run a mutating endpoint body and, if it committed a change, save the program
+     * before replying. Appends "; saved" or "; SAVE FAILED: reason" to the response.
+     * Requests that committed nothing (failures, no-ops) are returned unchanged and
+     * never trigger a save. Opt out per request with ?autosave=false, or globally with
+     * the "Auto-Save After Changes" tool option.
+     */
+    private String mutating(HttpExchange exchange, java.util.function.Supplier<String> body) {
+        synchronized (mutationLock) {
+            committedPrograms.clear();
+            String result = null;
+            RuntimeException failure = null;
+            try {
+                result = body.get();
+            } catch (RuntimeException e) {
+                failure = e;
+            }
+            List<Program> touched = new ArrayList<>(committedPrograms);
+            committedPrograms.clear();
+
+            String suffix = autoSaveSuffix(exchange, touched);
+            if (failure != null) {
+                if (!suffix.isEmpty()) {
+                    Msg.warn(this, "Request failed after committing changes" + suffix);
+                }
+                throw failure;
+            }
+            return result + suffix;
+        }
+    }
+
+    private String autoSaveSuffix(HttpExchange exchange, List<Program> touched) {
+        if (touched.isEmpty()) return "";
+
+        String perRequest = parseQueryParams(exchange).get("autosave");
+        boolean enabled = tool.getOptions(OPTION_CATEGORY_NAME).getBoolean(AUTOSAVE_OPTION_NAME, true);
+        if (perRequest != null) {
+            enabled = !perRequest.equalsIgnoreCase("false") && !perRequest.equals("0");
+        }
+        if (!enabled) return "; not saved (autosave disabled)";
+
+        StringBuilder suffix = new StringBuilder();
+        for (Program program : touched) {
+            if (!program.isChanged()) continue; // committed, but nothing differs from disk
+            AtomicBoolean ok = new AtomicBoolean(false);
+            String message = saveProgramNow(program, ok);
+            suffix.append(ok.get() ? "; saved" : "; SAVE FAILED: " + message);
+        }
+        return suffix.toString();
     }
 
     // ----------------------------------------------------------------------------------
@@ -3017,7 +3112,7 @@ public class GhidraMCPPlugin extends Plugin {
                 } catch (Exception e) {
                     Msg.error(this, "batchSetPrimaryLabels parse error", e);
                 } finally {
-                    program.endTransaction(tx, true);
+                    endTx(program, tx, succeeded > 0);
                 }
                 result.set("Total: " + (succeeded + failed) + ", Succeeded: " + succeeded +
                     ", Failed: " + failed +
@@ -3097,7 +3192,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Error setting primary label", e);
                     result.set("Error: " + e.getMessage());
                 } finally {
-                    program.endTransaction(tx, success);
+                    endTx(program, tx, success);
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {

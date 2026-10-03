@@ -98,6 +98,20 @@ Another MCP client that supports multiple models on the backend is [5ire](https:
 2. Name: GhidraMCP
 3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
 
+# Auto-save
+
+Every tool that modifies the program saves it to its project file immediately
+after the change is committed, so a Ghidra crash cannot lose API edits. The
+response to a modifying call keeps its usual text and gains a suffix:
+`; saved` on success, or `; SAVE FAILED: <reason>`. Read-only calls never save,
+and neither do calls that fail or change nothing. `/save_program` (the
+`save_program` tool) still saves on demand.
+
+Auto-save is on by default. To turn it off, uncheck `Auto-Save After Changes`
+in `Edit` -> `Tool Options` -> `GhidraMCP HTTP Server`, or opt out of a single
+request by adding `?autosave=false` to the URL (calls then end with
+`; not saved (autosave disabled)`).
+
 # Building from Source
 
 The build is tied to one specific Ghidra install: it compiles against that
