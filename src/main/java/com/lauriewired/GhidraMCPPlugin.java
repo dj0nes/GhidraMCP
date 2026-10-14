@@ -749,19 +749,23 @@ public class GhidraMCPPlugin extends Plugin {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         DecompInterface decomp = new DecompInterface();
-        decomp.openProgram(program);
-        for (Function func : program.getFunctionManager().getFunctions(true)) {
-            if (func.getName().equals(name)) {
-                DecompileResults result =
-                    decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
-                if (result != null && result.decompileCompleted()) {
-                    return result.getDecompiledFunction().getC();
-                } else {
-                    return "Decompilation failed";
+        try {
+            decomp.openProgram(program);
+            for (Function func : program.getFunctionManager().getFunctions(true)) {
+                if (func.getName().equals(name)) {
+                    DecompileResults result =
+                        decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+                    if (result != null && result.decompileCompleted()) {
+                        return result.getDecompiledFunction().getC();
+                    } else {
+                        return "Decompilation failed";
+                    }
                 }
             }
+            return "Function not found";
+        } finally {
+            decomp.dispose();
         }
-        return "Function not found";
     }
 
     private boolean renameFunction(String oldName, String newName) {
@@ -843,88 +847,92 @@ public class GhidraMCPPlugin extends Plugin {
         if (program == null) return "No program loaded";
 
         DecompInterface decomp = new DecompInterface();
-        decomp.openProgram(program);
-
-        Function func = null;
-        for (Function f : program.getFunctionManager().getFunctions(true)) {
-            if (f.getName().equals(functionName)) {
-                func = f;
-                break;
-            }
-        }
-
-        if (func == null) {
-            return "Function not found";
-        }
-
-        DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
-        if (result == null || !result.decompileCompleted()) {
-            return "Decompilation failed";
-        }
-
-        HighFunction highFunction = result.getHighFunction();
-        if (highFunction == null) {
-            return "Decompilation failed (no high function)";
-        }
-
-        LocalSymbolMap localSymbolMap = highFunction.getLocalSymbolMap();
-        if (localSymbolMap == null) {
-            return "Decompilation failed (no local symbol map)";
-        }
-
-        HighSymbol highSymbol = null;
-        Iterator<HighSymbol> symbols = localSymbolMap.getSymbols();
-        while (symbols.hasNext()) {
-            HighSymbol symbol = symbols.next();
-            String symbolName = symbol.getName();
-            
-            if (symbolName.equals(oldVarName)) {
-                highSymbol = symbol;
-            }
-            if (symbolName.equals(newVarName)) {
-                return "Error: A variable with name '" + newVarName + "' already exists in this function";
-            }
-        }
-
-        if (highSymbol == null) {
-            return "Variable not found";
-        }
-
-        boolean commitRequired = checkFullCommit(highSymbol, highFunction);
-
-        final HighSymbol finalHighSymbol = highSymbol;
-        final Function finalFunction = func;
-        AtomicBoolean successFlag = new AtomicBoolean(false);
-
         try {
-            SwingUtilities.invokeAndWait(() -> {           
-                int tx = program.startTransaction("Rename variable");
-                try {
-                    if (commitRequired) {
-                        HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,
-                            ReturnCommitOption.NO_COMMIT, finalFunction.getSignatureSource());
+            decomp.openProgram(program);
+
+            Function func = null;
+            for (Function f : program.getFunctionManager().getFunctions(true)) {
+                if (f.getName().equals(functionName)) {
+                    func = f;
+                    break;
+                }
+            }
+
+            if (func == null) {
+                return "Function not found";
+            }
+
+            DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+            if (result == null || !result.decompileCompleted()) {
+                return "Decompilation failed";
+            }
+
+            HighFunction highFunction = result.getHighFunction();
+            if (highFunction == null) {
+                return "Decompilation failed (no high function)";
+            }
+
+            LocalSymbolMap localSymbolMap = highFunction.getLocalSymbolMap();
+            if (localSymbolMap == null) {
+                return "Decompilation failed (no local symbol map)";
+            }
+
+            HighSymbol highSymbol = null;
+            Iterator<HighSymbol> symbols = localSymbolMap.getSymbols();
+            while (symbols.hasNext()) {
+                HighSymbol symbol = symbols.next();
+                String symbolName = symbol.getName();
+            
+                if (symbolName.equals(oldVarName)) {
+                    highSymbol = symbol;
+                }
+                if (symbolName.equals(newVarName)) {
+                    return "Error: A variable with name '" + newVarName + "' already exists in this function";
+                }
+            }
+
+            if (highSymbol == null) {
+                return "Variable not found";
+            }
+
+            boolean commitRequired = checkFullCommit(highSymbol, highFunction);
+
+            final HighSymbol finalHighSymbol = highSymbol;
+            final Function finalFunction = func;
+            AtomicBoolean successFlag = new AtomicBoolean(false);
+
+            try {
+                SwingUtilities.invokeAndWait(() -> {           
+                    int tx = program.startTransaction("Rename variable");
+                    try {
+                        if (commitRequired) {
+                            HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,
+                                ReturnCommitOption.NO_COMMIT, finalFunction.getSignatureSource());
+                        }
+                        HighFunctionDBUtil.updateDBVariable(
+                            finalHighSymbol,
+                            newVarName,
+                            null,
+                            SourceType.USER_DEFINED
+                        );
+                        successFlag.set(true);
                     }
-                    HighFunctionDBUtil.updateDBVariable(
-                        finalHighSymbol,
-                        newVarName,
-                        null,
-                        SourceType.USER_DEFINED
-                    );
-                    successFlag.set(true);
-                }
-                catch (Exception e) {
-                    Msg.error(this, "Failed to rename variable", e);
-                }
-                finally {
-                    successFlag.set(endTx(program, tx, successFlag.get()));
-                }
-            });
-        } catch (InterruptedException | InvocationTargetException e) {
-            String errorMsg = "Failed to execute rename on Swing thread: " + e.getMessage();
-            Msg.error(this, errorMsg, e);
-            return errorMsg;
+                    catch (Exception e) {
+                        Msg.error(this, "Failed to rename variable", e);
+                    }
+                    finally {
+                        successFlag.set(endTx(program, tx, successFlag.get()));
+                    }
+                });
+            } catch (InterruptedException | InvocationTargetException e) {
+                String errorMsg = "Failed to execute rename on Swing thread: " + e.getMessage();
+                Msg.error(this, errorMsg, e);
+                return errorMsg;
+            }
+            return successFlag.get() ? "Variable renamed" : "Failed to rename variable";
+        } finally {
+            decomp.dispose();
         }
-        return successFlag.get() ? "Variable renamed" : "Failed to rename variable";
     }
 
     private String renameVariableByAddress(String functionAddressStr, String oldVarName, String newVarName) {
@@ -947,74 +955,78 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         DecompInterface decomp = new DecompInterface();
-        decomp.openProgram(program);
-        decomp.setSimplificationStyle("decompile");
-
-        DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
-        if (result == null || !result.decompileCompleted()) {
-            return "Decompilation failed";
-        }
-
-        HighFunction highFunction = result.getHighFunction();
-        if (highFunction == null) {
-            return "Decompilation failed (no high function)";
-        }
-
-        LocalSymbolMap localSymbolMap = highFunction.getLocalSymbolMap();
-        if (localSymbolMap == null) {
-            return "Decompilation failed (no local symbol map)";
-        }
-
-        HighSymbol highSymbol = null;
-        Iterator<HighSymbol> symbols = localSymbolMap.getSymbols();
-        while (symbols.hasNext()) {
-            HighSymbol symbol = symbols.next();
-            String symbolName = symbol.getName();
-            if (symbolName.equals(oldVarName)) {
-                highSymbol = symbol;
-            }
-            if (symbolName.equals(newVarName)) {
-                return "Error: A variable named '" + newVarName + "' already exists in this function";
-            }
-        }
-
-        if (highSymbol == null) {
-            return "Variable '" + oldVarName + "' not found in function at " + functionAddressStr;
-        }
-
-        boolean commitRequired = checkFullCommit(highSymbol, highFunction);
-
-        final HighSymbol finalHighSymbol = highSymbol;
-        final Function finalFunction = func;
-        AtomicBoolean successFlag = new AtomicBoolean(false);
-
         try {
-            SwingUtilities.invokeAndWait(() -> {
-                int tx = program.startTransaction("Rename variable by address");
-                try {
-                    if (commitRequired) {
-                        HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,
-                            ReturnCommitOption.NO_COMMIT, finalFunction.getSignatureSource());
-                    }
-                    HighFunctionDBUtil.updateDBVariable(
-                        finalHighSymbol,
-                        newVarName,
-                        null,
-                        SourceType.USER_DEFINED
-                    );
-                    successFlag.set(true);
-                } catch (Exception e) {
-                    Msg.error(this, "Failed to rename variable by address", e);
-                } finally {
-                    endTx(program, tx, successFlag.get());
+            decomp.openProgram(program);
+            decomp.setSimplificationStyle("decompile");
+
+            DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+            if (result == null || !result.decompileCompleted()) {
+                return "Decompilation failed";
+            }
+
+            HighFunction highFunction = result.getHighFunction();
+            if (highFunction == null) {
+                return "Decompilation failed (no high function)";
+            }
+
+            LocalSymbolMap localSymbolMap = highFunction.getLocalSymbolMap();
+            if (localSymbolMap == null) {
+                return "Decompilation failed (no local symbol map)";
+            }
+
+            HighSymbol highSymbol = null;
+            Iterator<HighSymbol> symbols = localSymbolMap.getSymbols();
+            while (symbols.hasNext()) {
+                HighSymbol symbol = symbols.next();
+                String symbolName = symbol.getName();
+                if (symbolName.equals(oldVarName)) {
+                    highSymbol = symbol;
                 }
-            });
-        } catch (InterruptedException | InvocationTargetException e) {
-            String errorMsg = "Failed to execute rename on Swing thread: " + e.getMessage();
-            Msg.error(this, errorMsg, e);
-            return errorMsg;
+                if (symbolName.equals(newVarName)) {
+                    return "Error: A variable named '" + newVarName + "' already exists in this function";
+                }
+            }
+
+            if (highSymbol == null) {
+                return "Variable '" + oldVarName + "' not found in function at " + functionAddressStr;
+            }
+
+            boolean commitRequired = checkFullCommit(highSymbol, highFunction);
+
+            final HighSymbol finalHighSymbol = highSymbol;
+            final Function finalFunction = func;
+            AtomicBoolean successFlag = new AtomicBoolean(false);
+
+            try {
+                SwingUtilities.invokeAndWait(() -> {
+                    int tx = program.startTransaction("Rename variable by address");
+                    try {
+                        if (commitRequired) {
+                            HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,
+                                ReturnCommitOption.NO_COMMIT, finalFunction.getSignatureSource());
+                        }
+                        HighFunctionDBUtil.updateDBVariable(
+                            finalHighSymbol,
+                            newVarName,
+                            null,
+                            SourceType.USER_DEFINED
+                        );
+                        successFlag.set(true);
+                    } catch (Exception e) {
+                        Msg.error(this, "Failed to rename variable by address", e);
+                    } finally {
+                        endTx(program, tx, successFlag.get());
+                    }
+                });
+            } catch (InterruptedException | InvocationTargetException e) {
+                String errorMsg = "Failed to execute rename on Swing thread: " + e.getMessage();
+                Msg.error(this, errorMsg, e);
+                return errorMsg;
+            }
+            return successFlag.get() ? "Variable renamed successfully" : "Failed to rename variable";
+        } finally {
+            decomp.dispose();
         }
-        return successFlag.get() ? "Variable renamed successfully" : "Failed to rename variable";
     }
 
     /**
@@ -1159,12 +1171,16 @@ public class GhidraMCPPlugin extends Plugin {
             if (func == null) return "No function found at or containing address " + addressStr;
 
             DecompInterface decomp = new DecompInterface();
-            decomp.openProgram(program);
-            DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+            try {
+                decomp.openProgram(program);
+                DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
 
-            return (result != null && result.decompileCompleted()) 
-                ? result.getDecompiledFunction().getC() 
-                : "Decompilation failed";
+                return (result != null && result.decompileCompleted()) 
+                    ? result.getDecompiledFunction().getC() 
+                    : "Decompilation failed";
+            } finally {
+                decomp.dispose();
+            }
         } catch (Exception e) {
             return "Error decompiling function: " + e.getMessage();
         }
@@ -1548,18 +1564,22 @@ public class GhidraMCPPlugin extends Plugin {
     private DecompileResults decompileFunction(Function func, Program program) {
         // Set up decompiler for accessing the decompiled function
         DecompInterface decomp = new DecompInterface();
-        decomp.openProgram(program);
-        decomp.setSimplificationStyle("decompile"); // Full decompilation
+        try {
+            decomp.openProgram(program);
+            decomp.setSimplificationStyle("decompile"); // Full decompilation
 
-        // Decompile the function
-        DecompileResults results = decomp.decompileFunction(func, 60, new ConsoleTaskMonitor());
+            // Decompile the function
+            DecompileResults results = decomp.decompileFunction(func, 60, new ConsoleTaskMonitor());
 
-        if (!results.decompileCompleted()) {
-            Msg.error(this, "Could not decompile function: " + results.getErrorMessage());
-            return null;
+            if (!results.decompileCompleted()) {
+                Msg.error(this, "Could not decompile function: " + results.getErrorMessage());
+                return null;
+            }
+
+            return results;
+        } finally {
+            decomp.dispose();
         }
-
-        return results;
     }
 
     /**
