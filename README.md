@@ -111,12 +111,51 @@ The function header comment (`Function.getComment`) is stored as the plate
 comment at the function's entry point, so `get_comments` shows it as `plate`
 and `delete_comment` with `comment_type=plate` removes it.
 
+# Multiple programs
+
+Every endpoint takes an optional `program` argument that picks which open
+program it works on. Without it, the endpoint uses the active CodeBrowser tab,
+as before.
+
+- GET endpoints: add `?program=...` to the query string.
+- Form POST endpoints: put `program` in the form body or the query string.
+- JSON POST endpoints: put `?program=...` in the URL (works for array bodies);
+  a top-level `"program"` key in a JSON object body also works.
+- `/decompile` (raw function-name body): query string only.
+
+The value is matched against the programs open in the tool, in this order:
+exact project path (`/shells/mercs_dos/MW2SHELL.EXE`), exact program name (the
+tab label, `MW2SHELL.EXE`), then the same two case-insensitively. The first
+step with a match wins. If that step matches more than one program, the reply
+is HTTP 400 listing the candidates' project paths, so pass the path instead. If
+nothing matches, the reply is HTTP 404 listing the open programs.
+
+| Endpoint | Tool | Purpose |
+| --- | --- | --- |
+| `GET /list_open_programs` | `list_open_programs` | One tab-separated line per open program: name, project path, `language:compiler`, and `(active)` on the front tab. |
+| `GET` or `POST /switch_tab?program=` | `switch_tab` | Bring that program's tab to the front. 400 without `program`. |
+| any endpoint `?program=` | every tool's optional `program` argument | Run the call against that program instead of the active tab. |
+
+`get_current_address` and `get_current_function` follow the GUI cursor, which
+only exists in the active tab. Given a `program` that is not the active tab,
+they say so instead of answering; call `switch_tab` first.
+
+Auto-save (below) saves the program the call modified, which is the one named by
+`program`, not whichever tab happens to be in front.
+
 # Auto-save
 
 Every tool that modifies the program saves it to its project file immediately
 after the change is committed, so a Ghidra crash cannot lose API edits. The
 response to a modifying call keeps its usual text and gains a suffix:
-`; saved` on success, or `; SAVE FAILED: <reason>`. Read-only calls never save,
+`; saved` on success, or `; SAVE FAILED: <reason>`.
+
+A save can be refused with "Unable to lock due to active transaction" while
+auto-analysis (or anything else) holds a transaction on the program. The call
+then ends with `; save deferred (...)` and the plugin retries in the background
+every 5 seconds for up to 2 minutes. Pending saves are coalesced, one retry
+chain per program, and a retry that finds nothing unsaved stops early. The
+outcome goes to the Ghidra log (`Deferred save succeeded` or `gave up`). Read-only calls never save,
 and neither do calls that fail or change nothing. `/save_program` (the
 `save_program` tool) still saves on demand.
 

@@ -72,6 +72,7 @@ import ghidra.app.decompiler.ClangToken;
 import ghidra.framework.options.Options;
 
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 import javax.swing.SwingUtilities;
@@ -140,38 +141,38 @@ public class GhidraMCPPlugin extends Plugin {
         server = HttpServer.create(new InetSocketAddress(port), 0);
 
         // Each listing endpoint uses offset & limit from query params:
-        server.createContext("/methods", exchange -> {
+        createContext("/methods", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, getAllFunctionNames(offset, limit));
         });
 
-        server.createContext("/classes", exchange -> {
+        createContext("/classes", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, getAllClassNames(offset, limit));
         });
 
-        server.createContext("/decompile", exchange -> {
+        createContext("/decompile", exchange -> {
             String name = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             sendResponse(exchange, decompileFunctionByName(name));
         });
 
-        server.createContext("/renameFunction", exchange -> {
+        createContext("/renameFunction", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String response = mutating(exchange, () -> renameFunction(params.get("oldName"), params.get("newName"))
                     ? "Renamed successfully" : "Rename failed");
             sendResponse(exchange, response);
         });
 
-        server.createContext("/renameData", exchange -> {
+        createContext("/renameData", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             sendResponse(exchange, mutating(exchange, () -> renameDataAtAddress(params.get("address"), params.get("newName"))));
         });
 
-        server.createContext("/renameVariable", exchange -> {
+        createContext("/renameVariable", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String functionName = params.get("functionName");
             String oldName = params.get("oldName");
@@ -180,42 +181,42 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
-        server.createContext("/segments", exchange -> {
+        createContext("/segments", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, listSegments(offset, limit));
         });
 
-        server.createContext("/imports", exchange -> {
+        createContext("/imports", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, listImports(offset, limit));
         });
 
-        server.createContext("/exports", exchange -> {
+        createContext("/exports", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, listExports(offset, limit));
         });
 
-        server.createContext("/namespaces", exchange -> {
+        createContext("/namespaces", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, listNamespaces(offset, limit));
         });
 
-        server.createContext("/data", exchange -> {
+        createContext("/data", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
             sendResponse(exchange, listDefinedData(offset, limit));
         });
 
-        server.createContext("/searchFunctions", exchange -> {
+        createContext("/searchFunctions", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String searchTerm = qparams.get("query");
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
@@ -225,37 +226,37 @@ public class GhidraMCPPlugin extends Plugin {
 
         // New API endpoints based on requirements
         
-        server.createContext("/get_function_by_address", exchange -> {
+        createContext("/get_function_by_address", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             sendResponse(exchange, getFunctionByAddress(address));
         });
 
-        server.createContext("/get_current_address", exchange -> {
+        createContext("/get_current_address", exchange -> {
             sendResponse(exchange, getCurrentAddress());
         });
 
-        server.createContext("/get_current_function", exchange -> {
+        createContext("/get_current_function", exchange -> {
             sendResponse(exchange, getCurrentFunction());
         });
 
-        server.createContext("/list_functions", exchange -> {
+        createContext("/list_functions", exchange -> {
             sendResponse(exchange, listFunctions());
         });
 
-        server.createContext("/decompile_function", exchange -> {
+        createContext("/decompile_function", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             sendResponse(exchange, decompileFunctionByAddress(address));
         });
 
-        server.createContext("/disassemble_function", exchange -> {
+        createContext("/disassemble_function", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             sendResponse(exchange, disassembleFunction(address));
         });
 
-        server.createContext("/set_decompiler_comment", exchange -> {
+        createContext("/set_decompiler_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
@@ -266,7 +267,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, response);
         });
 
-        server.createContext("/set_disassembly_comment", exchange -> {
+        createContext("/set_disassembly_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String comment = params.get("comment");
@@ -277,7 +278,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, response);
         });
 
-        server.createContext("/rename_function_by_address", exchange -> {
+        createContext("/rename_function_by_address", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String functionAddress = params.get("function_address");
             String newName = params.get("new_name");
@@ -286,7 +287,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, response);
         });
 
-        server.createContext("/set_function_prototype", exchange -> {
+        createContext("/set_function_prototype", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String functionAddress = params.get("function_address");
             String prototype = params.get("prototype");
@@ -308,7 +309,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, response);
         });
 
-        server.createContext("/set_local_variable_type", exchange -> {
+        createContext("/set_local_variable_type", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String functionAddress = params.get("function_address");
             String variableName = params.get("variable_name");
@@ -351,7 +352,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, response);
         });
 
-        server.createContext("/xrefs_to", exchange -> {
+        createContext("/xrefs_to", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
@@ -359,7 +360,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getXrefsTo(address, offset, limit));
         });
 
-        server.createContext("/xrefs_from", exchange -> {
+        createContext("/xrefs_from", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
@@ -367,7 +368,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getXrefsFrom(address, offset, limit));
         });
 
-        server.createContext("/function_xrefs", exchange -> {
+        createContext("/function_xrefs", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String name = qparams.get("name");
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
@@ -375,7 +376,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getFunctionXrefs(name, offset, limit));
         });
 
-        server.createContext("/strings", exchange -> {
+        createContext("/strings", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
@@ -383,7 +384,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
         });
 
-        server.createContext("/clear_data", exchange -> {
+        createContext("/clear_data", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String size = params.get("size");
@@ -391,7 +392,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
-        server.createContext("/define_data", exchange -> {
+        createContext("/define_data", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String dataType = params.get("data_type");
@@ -400,13 +401,13 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
-        server.createContext("/define_data_batch", exchange -> {
+        createContext("/define_data_batch", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> defineDataBatch(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/read_bytes", exchange -> {
+        createContext("/read_bytes", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             String length = qparams.get("length");
@@ -414,21 +415,21 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
-        server.createContext("/get_data_at", exchange -> {
+        createContext("/get_data_at", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             String result = getDataAt(address);
             sendResponse(exchange, result);
         });
 
-        server.createContext("/batch_rename_functions", exchange -> {
+        createContext("/batch_rename_functions", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> batchRenameFunctions(body));
             sendResponse(exchange, result);
         });
 
         // Batch version of /renameData: JSON array of {address, new_name} objects.
-        server.createContext("/batch_rename_data", exchange -> {
+        createContext("/batch_rename_data", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> batchRenameData(body));
             sendResponse(exchange, result);
@@ -437,19 +438,19 @@ public class GhidraMCPPlugin extends Plugin {
         // Batch version of /create_function: JSON array of {address, name?} objects.
         // Each entry becomes a USER_DEFINED function; if a function already exists at the
         // address and `name` is provided, it is renamed instead.
-        server.createContext("/batch_create_function", exchange -> {
+        createContext("/batch_create_function", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> batchCreateFunction(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/batch_set_comments", exchange -> {
+        createContext("/batch_set_comments", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> batchSetComments(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/create_label", exchange -> {
+        createContext("/create_label", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String name = params.get("name");
@@ -458,31 +459,31 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
-        server.createContext("/create_enum", exchange -> {
+        createContext("/create_enum", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> createEnum(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/create_struct", exchange -> {
+        createContext("/create_struct", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> createStruct(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/update_struct_field", exchange -> {
+        createContext("/update_struct_field", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> updateStructField(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/delete_data_type", exchange -> {
+        createContext("/delete_data_type", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String result = mutating(exchange, () -> deleteDataType(params.get("name")));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/apply_struct", exchange -> {
+        createContext("/apply_struct", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String structName = params.get("struct_name");
@@ -490,7 +491,7 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
-        server.createContext("/create_function", exchange -> {
+        createContext("/create_function", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String name = params.get("name");
@@ -502,14 +503,14 @@ public class GhidraMCPPlugin extends Plugin {
         // only the function object goes away. Needed to clear a degenerate or
         // wrongly-bounded function before redefining a routine properly.
         // POST params: address
-        server.createContext("/delete_function", exchange -> {
+        createContext("/delete_function", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             sendResponse(exchange, mutating(exchange, () -> deleteFunctionAt(params.get("address"))));
         });
 
         // Define an array of `count` elements of `data_type` at `address`.
         // POST params: address, data_type, count, label (optional)
-        server.createContext("/create_array", exchange -> {
+        createContext("/create_array", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String result = mutating(exchange, () -> createArray(params.get("address"), params.get("data_type"),
                                         params.get("count"), params.get("label")));
@@ -521,7 +522,7 @@ public class GhidraMCPPlugin extends Plugin {
         // every target, which is the only way to reach functions that have no
         // direct xrefs.
         // POST params: address, count, label (optional)
-        server.createContext("/create_pointer_array", exchange -> {
+        createContext("/create_pointer_array", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String result = mutating(exchange, () -> createArray(params.get("address"), "pointer",
                                         params.get("count"), params.get("label")));
@@ -530,7 +531,7 @@ public class GhidraMCPPlugin extends Plugin {
 
         // Plate comment: the boxed header block above a function in the listing.
         // POST params: address, comment
-        server.createContext("/set_plate_comment", exchange -> {
+        createContext("/set_plate_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String rejected = rejectBlankComment(params.get("comment"));
             if (rejected != null) { sendError(exchange, 400, rejected); return; }
@@ -541,14 +542,14 @@ public class GhidraMCPPlugin extends Plugin {
         });
 
         // Read every comment at one address. GET params: address
-        server.createContext("/get_comments", exchange -> {
+        createContext("/get_comments", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             sendResponse(exchange, getCommentsAt(qparams.get("address")));
         });
 
         // List all comments in an address range or function body.
         // GET params: start+end, or function; offset, limit
-        server.createContext("/list_comments", exchange -> {
+        createContext("/list_comments", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit  = parseIntOrDefault(qparams.get("limit"),  100);
@@ -558,7 +559,7 @@ public class GhidraMCPPlugin extends Plugin {
 
         // Remove a comment (set it to null). POST params: address, comment_type
         // (pre|post|eol|plate|repeatable|all)
-        server.createContext("/delete_comment", exchange -> {
+        createContext("/delete_comment", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String result = mutating(exchange, () -> deleteComment(params.get("address"), params.get("comment_type")));
             sendResponse(exchange, result);
@@ -566,13 +567,13 @@ public class GhidraMCPPlugin extends Plugin {
 
         // Persist the program to its project file. Without this, every change made
         // through this API is lost if Ghidra is closed or restarted.
-        server.createContext("/save_program", exchange -> {
+        createContext("/save_program", exchange -> {
             sendResponse(exchange, saveProgram());
         });
 
         // Set (or rename) the primary label at an address, deleting all other labels there first.
         // POST params: address, name
-        server.createContext("/set_primary_label", exchange -> {
+        createContext("/set_primary_label", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String name = params.get("name");
@@ -581,19 +582,35 @@ public class GhidraMCPPlugin extends Plugin {
         });
 
         // Batch version: JSON array of {address, name} objects — all done in one transaction.
-        server.createContext("/batch_set_primary_labels", exchange -> {
+        createContext("/batch_set_primary_labels", exchange -> {
             String body = readRequestBody(exchange);
             String result = mutating(exchange, () -> batchSetPrimaryLabels(body));
             sendResponse(exchange, result);
         });
 
-        server.createContext("/rename_variable", exchange -> {
+        createContext("/rename_variable", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
             String functionAddress = params.get("function_address");
             String oldName = params.get("old_name");
             String newName = params.get("new_name");
             String result = mutating(exchange, () -> renameVariableByAddress(functionAddress, oldName, newName));
             sendResponse(exchange, result);
+        });
+
+        // Multi-program support: every endpoint accepts ?program=..., these two
+        // let a client see what is open and bring one to the front.
+        createContext("/list_open_programs", exchange -> {
+            sendResponse(exchange, listOpenPrograms());
+        });
+
+        createContext("/switch_tab", exchange -> {
+            Program target = requestProgram.get();
+            if (target == null) {
+                sendError(exchange, 400, "switch_tab needs program=<name or project path>\n"
+                    + listOpenPrograms());
+                return;
+            }
+            sendResponse(exchange, switchTab(target));
         });
 
         server.setExecutor(null);
@@ -1099,6 +1116,10 @@ public class GhidraMCPPlugin extends Plugin {
      * Get current address selected in Ghidra GUI
      */
     private String getCurrentAddress() {
+        if (requestTargetsBackgroundProgram()) {
+            return "The cursor lives in the active tab, not " + getCurrentProgram().getName()
+                + "; call switch_tab?program=... first";
+        }
         CodeViewerService service = tool.getService(CodeViewerService.class);
         if (service == null) return "Code viewer service not available";
 
@@ -1110,6 +1131,10 @@ public class GhidraMCPPlugin extends Plugin {
      * Get current function selected in Ghidra GUI
      */
     private String getCurrentFunction() {
+        if (requestTargetsBackgroundProgram()) {
+            return "The cursor lives in the active tab, not " + getCurrentProgram().getName()
+                + "; call switch_tab?program=... first";
+        }
         CodeViewerService service = tool.getService(CodeViewerService.class);
         if (service == null) return "Code viewer service not available";
 
@@ -3133,6 +3158,15 @@ public class GhidraMCPPlugin extends Plugin {
      * succeeded; the return value is the human-readable outcome either way.
      */
     private String saveProgramNow(Program program, AtomicBoolean ok) {
+        return saveProgramNow(program, ok, new AtomicBoolean(false));
+    }
+
+    /**
+     * As above; `lockBusy` is set when the save failed only because another
+     * transaction (typically auto-analysis) holds the program, so a later retry
+     * can succeed.
+     */
+    private String saveProgramNow(Program program, AtomicBoolean ok, AtomicBoolean lockBusy) {
         AtomicReference<String> result = new AtomicReference<>("Failed to save program");
 
         try {
@@ -3147,7 +3181,13 @@ public class GhidraMCPPlugin extends Plugin {
                     ok.set(true);
                     result.set("Saved " + program.getName() + " to " + df.getPathname());
                 } catch (Exception e) {
-                    Msg.error(this, "Error saving program", e);
+                    if (isTransactionLockFailure(e)) {
+                        lockBusy.set(true);
+                        Msg.info(this, "Save of " + program.getName()
+                            + " blocked by an active transaction: " + e.getMessage());
+                    } else {
+                        Msg.error(this, "Error saving program", e);
+                    }
                     result.set("Error saving program: " + e.getMessage());
                 }
             });
@@ -3226,10 +3266,93 @@ public class GhidraMCPPlugin extends Plugin {
         for (Program program : touched) {
             if (!program.isChanged()) continue; // committed, but nothing differs from disk
             AtomicBoolean ok = new AtomicBoolean(false);
-            String message = saveProgramNow(program, ok);
-            suffix.append(ok.get() ? "; saved" : "; SAVE FAILED: " + message);
+            AtomicBoolean lockBusy = new AtomicBoolean(false);
+            String message = saveProgramNow(program, ok, lockBusy);
+            if (ok.get()) {
+                suffix.append("; saved");
+            } else if (lockBusy.get()) {
+                scheduleSaveRetry(program);
+                suffix.append("; save deferred (active transaction, e.g. auto-analysis; retrying every "
+                    + SAVE_RETRY_INTERVAL_SEC + "s for up to " + SAVE_RETRY_WINDOW_SEC + "s)");
+            } else {
+                suffix.append("; SAVE FAILED: " + message);
+            }
         }
         return suffix.toString();
+    }
+
+    // ----------------------------------------------------------------------------------
+    // Deferred save: a save refused because auto-analysis (or any other transaction)
+    // holds the program is retried in the background. One pending retry per program;
+    // later requests that hit the same lock just extend nothing and join it.
+    // ----------------------------------------------------------------------------------
+
+    private static final long SAVE_RETRY_INTERVAL_SEC = 5;
+    private static final long SAVE_RETRY_WINDOW_SEC = 120;
+
+    private final java.util.concurrent.ScheduledExecutorService saveRetryExecutor =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "GhidraMCP-SaveRetry");
+            t.setDaemon(true);
+            return t;
+        });
+
+    /** Program -> deadline (System.nanoTime) of its pending retry chain. */
+    private final Map<Program, Long> pendingSaves = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static boolean isTransactionLockFailure(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String m = t.getMessage();
+            if (m != null && (m.contains("active transaction") || m.contains("Unable to lock"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void scheduleSaveRetry(Program program) {
+        long deadline = System.nanoTime() + SAVE_RETRY_WINDOW_SEC * 1_000_000_000L;
+        if (pendingSaves.putIfAbsent(program, deadline) != null) {
+            return; // a retry for this program is already queued; it will save this change too
+        }
+        try {
+            saveRetryExecutor.schedule(() -> retrySave(program), SAVE_RETRY_INTERVAL_SEC,
+                java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            pendingSaves.remove(program); // plugin is disposing
+        }
+    }
+
+    private void retrySave(Program program) {
+        Long deadline = pendingSaves.get(program);
+        if (deadline == null) return;
+        if (program.isClosed()) {
+            pendingSaves.remove(program);
+            Msg.warn(this, "Deferred save dropped: " + program.getName() + " was closed");
+            return;
+        }
+        if (!program.isChanged()) {
+            pendingSaves.remove(program); // saved by someone else in the meantime
+            return;
+        }
+        AtomicBoolean ok = new AtomicBoolean(false);
+        AtomicBoolean lockBusy = new AtomicBoolean(false);
+        String message = saveProgramNow(program, ok, lockBusy);
+        if (ok.get()) {
+            pendingSaves.remove(program);
+            Msg.info(this, "Deferred save succeeded: " + message);
+        } else if (lockBusy.get() && System.nanoTime() < deadline) {
+            try {
+                saveRetryExecutor.schedule(() -> retrySave(program), SAVE_RETRY_INTERVAL_SEC,
+                    java.util.concurrent.TimeUnit.SECONDS);
+            } catch (java.util.concurrent.RejectedExecutionException e) {
+                pendingSaves.remove(program);
+            }
+        } else {
+            pendingSaves.remove(program);
+            Msg.error(this, "Deferred save of " + program.getName() + " gave up: " + message
+                + (lockBusy.get() ? " (still locked after " + SAVE_RETRY_WINDOW_SEC + "s)" : ""));
+        }
     }
 
     // ----------------------------------------------------------------------------------
@@ -3339,7 +3462,214 @@ public class GhidraMCPPlugin extends Plugin {
         return sb.toString();
     }
 
+    // ----------------------------------------------------------------------------------
+    // Multi-program support
+    // ----------------------------------------------------------------------------------
+
+    /**
+     * Program chosen by the current request's program=... argument. Set by the
+     * createContext() wrapper for the duration of one handler call on the HTTP thread
+     * and always cleared in finally. Null means "use the active CodeBrowser tab".
+     * Every endpoint method reads getCurrentProgram() on the HTTP thread before it
+     * hops to Swing, so the ThreadLocal is visible where it is read.
+     */
+    private final ThreadLocal<Program> requestProgram = new ThreadLocal<>();
+
+    /** Raised while resolving program=...; carries the HTTP status to reply with. */
+    private static final class ProgramResolutionException extends Exception {
+        final int status;
+        ProgramResolutionException(int status, String message) {
+            super(message);
+            this.status = status;
+        }
+    }
+
+    /**
+     * Register a context whose handler runs with the request's program=... resolved.
+     * The argument is read from the query string first, then from a form body or a
+     * top-level "program" key of a JSON object body. JSON array bodies (and the raw
+     * function-name body of /decompile) can only use the query string. The body is
+     * replayed so the handler reads it unchanged.
+     */
+    private void createContext(String path, HttpHandler handler) {
+        server.createContext(path, exchange -> {
+            try {
+                String programArg = extractProgramArg(path, exchange);
+                if (programArg != null && !programArg.isBlank()) {
+                    Program resolved;
+                    try {
+                        resolved = resolveProgram(programArg.trim());
+                    } catch (ProgramResolutionException e) {
+                        sendError(exchange, e.status, e.getMessage());
+                        return;
+                    }
+                    requestProgram.set(resolved);
+                }
+                handler.handle(exchange);
+            } finally {
+                requestProgram.remove();
+            }
+        });
+    }
+
+    private String extractProgramArg(String path, HttpExchange exchange) throws IOException {
+        String fromQuery = parseQueryParams(exchange).get("program");
+        if (fromQuery != null) return fromQuery;
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) return null;
+        if ("/decompile".equals(path)) return null; // raw body, not form-encoded
+
+        byte[] body = exchange.getRequestBody().readAllBytes();
+        exchange.setStreams(new java.io.ByteArrayInputStream(body), null);
+        String bodyStr = new String(body, StandardCharsets.UTF_8);
+        String trimmed = bodyStr.stripLeading();
+        if (trimmed.isEmpty() || trimmed.startsWith("[")) return null;
+        if (trimmed.startsWith("{")) {
+            try {
+                JsonElement root = JsonParser.parseString(bodyStr);
+                if (root.isJsonObject()) {
+                    JsonElement p = root.getAsJsonObject().get("program");
+                    if (p != null && p.isJsonPrimitive()) return p.getAsString();
+                }
+            } catch (Exception e) {
+                // Malformed JSON: let the endpoint report it.
+            }
+            return null;
+        }
+        for (String pair : bodyStr.split("&")) {
+            String[] kv = pair.split("=", 2);
+            if (kv.length == 2) {
+                try {
+                    if ("program".equals(URLDecoder.decode(kv[0], StandardCharsets.UTF_8))) {
+                        return URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+                    }
+                } catch (Exception e) {
+                    // ignore undecodable pair, same as parsePostParams
+                }
+            }
+        }
+        return null;
+    }
+
+    /** All programs open in this tool, read on the Swing thread. */
+    private List<Program> openPrograms() {
+        AtomicReference<List<Program>> out = new AtomicReference<>(new ArrayList<>());
+        Runnable read = () -> {
+            ProgramManager pm = tool.getService(ProgramManager.class);
+            if (pm != null) {
+                out.set(new ArrayList<>(Arrays.asList(pm.getAllOpenPrograms())));
+            } else {
+                Program p = activeProgram();
+                if (p != null) out.set(new ArrayList<>(List.of(p)));
+            }
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            read.run();
+        } else {
+            try {
+                SwingUtilities.invokeAndWait(read);
+            } catch (InterruptedException | InvocationTargetException e) {
+                Msg.error(this, "Failed to list open programs", e);
+            }
+        }
+        return out.get();
+    }
+
+    private static String projectPath(Program p) {
+        ghidra.framework.model.DomainFile df = p.getDomainFile();
+        return df != null ? df.getPathname() : "(no project file)";
+    }
+
+    /**
+     * Resolve a program=... argument against the open programs. Tries, in order:
+     * exact project path, exact name, case-insensitive path, case-insensitive name.
+     * The first tier with any match wins; more than one match in that tier is
+     * ambiguous (400), no match at all is 404.
+     */
+    private Program resolveProgram(String arg) throws ProgramResolutionException {
+        List<Program> open = openPrograms();
+        if (open.isEmpty()) {
+            throw new ProgramResolutionException(404, "No programs are open; cannot resolve program=" + arg);
+        }
+        List<java.util.function.Predicate<Program>> tiers = List.of(
+            p -> arg.equals(projectPath(p)),
+            p -> arg.equals(p.getName()),
+            p -> arg.equalsIgnoreCase(projectPath(p)),
+            p -> arg.equalsIgnoreCase(p.getName()));
+        for (java.util.function.Predicate<Program> tier : tiers) {
+            List<Program> hits = new ArrayList<>();
+            for (Program p : open) {
+                if (tier.test(p) && !hits.contains(p)) hits.add(p);
+            }
+            if (hits.size() == 1) return hits.get(0);
+            if (hits.size() > 1) {
+                StringBuilder sb = new StringBuilder("Ambiguous program=" + arg
+                    + "; it matches " + hits.size() + " open programs. Pass the project path instead:");
+                for (Program p : hits) sb.append("\n  ").append(projectPath(p));
+                throw new ProgramResolutionException(400, sb.toString());
+            }
+        }
+        throw new ProgramResolutionException(404, "No open program matches program=" + arg
+            + "\nOpen programs:\n" + listOpenPrograms());
+    }
+
+    /** One line per open program: name, project path, language:compiler, (active). */
+    private String listOpenPrograms() {
+        List<Program> open = openPrograms();
+        if (open.isEmpty()) return "No programs are open";
+        Program active = activeProgram();
+        StringBuilder sb = new StringBuilder();
+        for (Program p : open) {
+            if (sb.length() > 0) sb.append("\n");
+            sb.append(p.getName())
+              .append("\t").append(projectPath(p))
+              .append("\t").append(p.getLanguageID().getIdAsString())
+              .append(":").append(p.getCompilerSpec().getCompilerSpecID().getIdAsString());
+            if (p == active) sb.append("\t(active)");
+        }
+        return sb.toString();
+    }
+
+    /** Bring an open program's tab to the front. */
+    private String switchTab(Program target) {
+        AtomicReference<String> result = new AtomicReference<>("Failed to switch tab");
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                ProgramManager pm = tool.getService(ProgramManager.class);
+                if (pm == null) {
+                    result.set("ProgramManager service not available");
+                    return;
+                }
+                pm.setCurrentProgram(target);
+                Program now = pm.getCurrentProgram();
+                result.set(now == target
+                    ? "Active tab is now " + target.getName() + " (" + projectPath(target) + ")"
+                    : "Requested " + projectPath(target) + " but the active tab is "
+                        + (now == null ? "none" : projectPath(now)));
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            result.set("Thread error: " + e.getMessage());
+        }
+        return result.get();
+    }
+
+    /** True when the request named a program that is not the active tab. */
+    private boolean requestTargetsBackgroundProgram() {
+        Program requested = requestProgram.get();
+        return requested != null && requested != activeProgram();
+    }
+
+    /**
+     * The program this request operates on: the one named by program=... if given,
+     * otherwise the active CodeBrowser tab.
+     */
     public Program getCurrentProgram() {
+        Program requested = requestProgram.get();
+        if (requested != null) return requested;
+        return activeProgram();
+    }
+
+    /** The active CodeBrowser tab, ignoring any program=... on the request. */
+    private Program activeProgram() {
         ProgramManager pm = tool.getService(ProgramManager.class);
         if (pm != null && pm.getCurrentProgram() != null) {
             return pm.getCurrentProgram();
@@ -3501,6 +3831,11 @@ public class GhidraMCPPlugin extends Plugin {
 
     @Override
     public void dispose() {
+        saveRetryExecutor.shutdownNow();
+        if (!pendingSaves.isEmpty()) {
+            Msg.warn(this, "Plugin disposed with deferred saves pending for: " + pendingSaves.keySet());
+            pendingSaves.clear();
+        }
         if (server != null) {
             Msg.info(this, "Stopping GhidraMCP HTTP server...");
             server.stop(1); // Stop with a small delay (e.g., 1 second) for connections to finish
