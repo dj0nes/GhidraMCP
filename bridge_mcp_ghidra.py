@@ -502,8 +502,9 @@ def save_program(program: str = None) -> str:
 @mcp.tool()
 def list_open_programs() -> list:
     """
-    List every program open in the CodeBrowser, one per line:
-    name, project path, language:compiler, and "(active)" for the front tab.
+    List every program open in any CodeBrowser window, one per line:
+    name, project path, language:compiler, then "(active)" for the serving
+    window's front tab or "(other window: NAME)" for programs open elsewhere.
     Pass the name or the project path as the program argument of any other tool
     to work on that program without switching tabs.
     """

@@ -132,8 +132,8 @@ nothing matches, the reply is HTTP 404 listing the open programs.
 
 | Endpoint | Tool | Purpose |
 | --- | --- | --- |
-| `GET /list_open_programs` | `list_open_programs` | One tab-separated line per open program: name, project path, `language:compiler`, and `(active)` on the front tab. |
-| `GET` or `POST /switch_tab?program=` | `switch_tab` | Bring that program's tab to the front. 400 without `program`. |
+| `GET /list_open_programs` | `list_open_programs` | One tab-separated line per open program in any CodeBrowser window: name, project path, `language:compiler`, then `(active)` on the serving window's front tab or `(other window: NAME[, its active tab])`. |
+| `GET` or `POST /switch_tab?program=` | `switch_tab` | Bring that program's tab to the front in whichever window has it open. 400 without `program`. |
 | any endpoint `?program=` | every tool's optional `program` argument | Run the call against that program instead of the active tab. |
 
 `get_current_address` and `get_current_function` follow the GUI cursor, which
@@ -142,6 +142,19 @@ they say so instead of answering; call `switch_tab` first.
 
 Auto-save (below) saves the program the call modified, which is the one named by
 `program`, not whichever tab happens to be in front.
+
+## Multiple windows
+
+Ghidra creates one plugin instance per tool window, and only one can hold the
+HTTP port. The first window to open binds it; the others wait. When the owning
+window closes, it hands the port to a waiting window straight away, and each
+waiting window also retries every 2 seconds as a fallback, so the server comes
+back within a few seconds. The Ghidra log shows
+`GhidraMCP HTTP server took over port 8080` when that happens.
+
+`program` resolution and `list_open_programs` cover the programs open in every
+window that has the plugin, not only the serving one. Without `program`, calls
+still use the active tab of the window that currently serves the port.
 
 # Auto-save
 

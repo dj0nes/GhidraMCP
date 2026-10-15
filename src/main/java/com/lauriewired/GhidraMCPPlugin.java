@@ -83,6 +83,11 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -117,27 +122,117 @@ public class GhidraMCPPlugin extends Plugin {
             "so no change lives only in memory. A request can opt out with autosave=false " +
             "in its query string.");
 
-        try {
-            startServer();
-        }
-        catch (IOException e) {
-            Msg.error(this, "Failed to start HTTP server", e);
+        synchronized (REGISTRY_LOCK) {
+            LIVE.add(this);
+            // Another window may own the port. Poll until it is free; the owner's
+            // dispose() also hands off directly so the gap is usually ~1 s.
+            if (!tryBind()) {
+                retryTask = bindRetryExecutor.scheduleWithFixedDelay(this::tryBind,
+                    BIND_RETRY_SEC, BIND_RETRY_SEC, TimeUnit.SECONDS);
+            }
         }
         Msg.info(this, "GhidraMCPPlugin loaded!");
     }
 
-    private void startServer() throws IOException {
-        // Read the configured port
-        Options options = tool.getOptions(OPTION_CATEGORY_NAME);
-        int port = options.getInt(PORT_OPTION_NAME, DEFAULT_PORT);
+    // ----------------------------------------------------------------------------------
+    // Port ownership across tool windows
+    // ----------------------------------------------------------------------------------
+    //
+    // Ghidra makes one plugin instance per tool window (each CodeBrowser). Only one
+    // can bind the HTTP port. The rest wait: each polls every BIND_RETRY_SEC, and the
+    // owner's dispose() pokes them so one takes over as soon as the port is free.
+    // REGISTRY_LOCK guards LIVE, PORT_OWNERS and every instance's server/retryTask.
 
-        // Stop existing server if running (e.g., if plugin is reloaded)
-        if (server != null) {
-            Msg.info(this, "Stopping existing HTTP server before starting new one.");
-            server.stop(0);
-            server = null;
+    private static final Object REGISTRY_LOCK = new Object();
+    /** Live plugin instances, oldest first. Guarded by REGISTRY_LOCK. */
+    private static final List<GhidraMCPPlugin> LIVE = new ArrayList<>();
+    /** Port -> instance whose HttpServer holds it. Guarded by REGISTRY_LOCK. */
+    private static final Map<Integer, GhidraMCPPlugin> PORT_OWNERS = new HashMap<>();
+    private static final long BIND_RETRY_SEC = 2;
+
+    private boolean disposed;          // guarded by REGISTRY_LOCK
+    private boolean bindEverFailed;    // guarded by REGISTRY_LOCK
+    private int boundPort = -1;        // guarded by REGISTRY_LOCK
+    private ScheduledFuture<?> retryTask; // guarded by REGISTRY_LOCK
+
+    private final ScheduledExecutorService bindRetryExecutor =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "GhidraMCP-PortTakeover");
+            t.setDaemon(true);
+            return t;
+        });
+
+    /**
+     * Try to become the HTTP server for the configured port. Safe to call from any
+     * thread, any number of times. Returns true when this instance holds the port.
+     */
+    private boolean tryBind() {
+        int port;
+        try {
+            port = tool.getOptions(OPTION_CATEGORY_NAME).getInt(PORT_OPTION_NAME, DEFAULT_PORT);
+        } catch (Exception e) {
+            return false; // tool is going away
         }
+        synchronized (REGISTRY_LOCK) {
+            if (disposed) return false;
+            if (server != null) return true;
+            GhidraMCPPlugin owner = PORT_OWNERS.get(port);
+            String why;
+            if (owner != null && owner != this) {
+                why = "another GhidraMCP window owns it";
+            } else {
+                try {
+                    startServer(port);
+                    PORT_OWNERS.put(port, this);
+                    boundPort = port;
+                    if (retryTask != null) {
+                        retryTask.cancel(false);
+                        retryTask = null;
+                    }
+                    Msg.info(this, bindEverFailed
+                        ? "GhidraMCP HTTP server took over port " + port
+                        : "GhidraMCP HTTP server started on port " + port);
+                    return true;
+                } catch (IOException | RuntimeException e) {
+                    if (server != null) {
+                        server.stop(0);
+                        server = null;
+                    }
+                    why = e.getClass().getSimpleName() + ": " + e.getMessage();
+                }
+            }
+            if (!bindEverFailed) {
+                bindEverFailed = true;
+                Msg.info(this, "GhidraMCP HTTP server could not bind port " + port + " (" + why
+                    + "); this window will take over when it frees up (retrying every "
+                    + BIND_RETRY_SEC + " s)");
+            }
+            return false;
+        }
+    }
 
+    /** Ask this instance to try binding now, on its own retry thread. */
+    private void requestImmediateBind() {
+        try {
+            bindRetryExecutor.execute(this::tryBind);
+        } catch (RejectedExecutionException e) {
+            // Disposed concurrently; nothing to do.
+        }
+    }
+
+    /** Live instances with this (the serving one) first, then the rest oldest first. */
+    private List<GhidraMCPPlugin> liveInstancesServingFirst() {
+        List<GhidraMCPPlugin> out;
+        synchronized (REGISTRY_LOCK) {
+            out = new ArrayList<>(LIVE);
+        }
+        out.remove(this);
+        out.add(0, this);
+        return out;
+    }
+
+    /** Must hold REGISTRY_LOCK. Registers every endpoint and starts listening. */
+    private void startServer(int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
 
         // Each listing endpoint uses offset & limit from query params:
@@ -614,15 +709,7 @@ public class GhidraMCPPlugin extends Plugin {
         });
 
         server.setExecutor(null);
-        new Thread(() -> {
-            try {
-                server.start();
-                Msg.info(this, "GhidraMCP HTTP server started on port " + port);
-            } catch (Exception e) {
-                Msg.error(this, "Failed to start HTTP server on port " + port + ". Port might be in use.", e);
-                server = null; // Ensure server isn't considered running
-            }
-        }, "GhidraMCP-HTTP-Server").start();
+        server.start(); // non-blocking: spawns the server's dispatcher thread
     }
 
     // ----------------------------------------------------------------------------------
@@ -1116,11 +1203,12 @@ public class GhidraMCPPlugin extends Plugin {
      * Get current address selected in Ghidra GUI
      */
     private String getCurrentAddress() {
-        if (requestTargetsBackgroundProgram()) {
+        GhidraMCPPlugin host = cursorHost();
+        if (requestTargetsBackgroundProgram(host)) {
             return "The cursor lives in the active tab, not " + getCurrentProgram().getName()
                 + "; call switch_tab?program=... first";
         }
-        CodeViewerService service = tool.getService(CodeViewerService.class);
+        CodeViewerService service = host.getTool().getService(CodeViewerService.class);
         if (service == null) return "Code viewer service not available";
 
         ProgramLocation location = service.getCurrentLocation();
@@ -1131,11 +1219,12 @@ public class GhidraMCPPlugin extends Plugin {
      * Get current function selected in Ghidra GUI
      */
     private String getCurrentFunction() {
-        if (requestTargetsBackgroundProgram()) {
+        GhidraMCPPlugin host = cursorHost();
+        if (requestTargetsBackgroundProgram(host)) {
             return "The cursor lives in the active tab, not " + getCurrentProgram().getName()
                 + "; call switch_tab?program=... first";
         }
-        CodeViewerService service = tool.getService(CodeViewerService.class);
+        CodeViewerService service = host.getTool().getService(CodeViewerService.class);
         if (service == null) return "Code viewer service not available";
 
         ProgramLocation location = service.getCurrentLocation();
@@ -1440,8 +1529,8 @@ public class GhidraMCPPlugin extends Plugin {
             DataTypeManager dtm = program.getDataTypeManager();
 
             // Get data type manager service
-            ghidra.app.services.DataTypeManagerService dtms = 
-                tool.getService(ghidra.app.services.DataTypeManagerService.class);
+            ghidra.app.services.DataTypeManagerService dtms = hostFor(program).getTool()
+                .getService(ghidra.app.services.DataTypeManagerService.class);
 
             // Create function signature parser
             ghidra.app.util.parser.FunctionSignatureParser parser = 
@@ -3550,17 +3639,47 @@ public class GhidraMCPPlugin extends Plugin {
         return null;
     }
 
-    /** All programs open in this tool, read on the Swing thread. */
-    private List<Program> openPrograms() {
-        AtomicReference<List<Program>> out = new AtomicReference<>(new ArrayList<>());
+    /** An open program and the plugin instance whose tool window has it open. */
+    private static final class OpenProgram {
+        final Program program;
+        final GhidraMCPPlugin host;
+        OpenProgram(Program program, GhidraMCPPlugin host) {
+            this.program = program;
+            this.host = host;
+        }
+    }
+
+    /** Programs open in this instance's own tool (call on the Swing thread). */
+    private List<Program> programsInOwnTool() {
+        ProgramManager pm = tool.getService(ProgramManager.class);
+        if (pm != null) return Arrays.asList(pm.getAllOpenPrograms());
+        Program p = activeProgram();
+        return p != null ? List.of(p) : List.of();
+    }
+
+    /**
+     * Every program open in every live GhidraMCP tool window, read on the Swing
+     * thread. The serving window's programs come first; a program open in two
+     * windows is listed once, under the first window that has it.
+     */
+    private List<OpenProgram> openPrograms() {
+        AtomicReference<List<OpenProgram>> out = new AtomicReference<>(new ArrayList<>());
+        List<GhidraMCPPlugin> instances = liveInstancesServingFirst();
         Runnable read = () -> {
-            ProgramManager pm = tool.getService(ProgramManager.class);
-            if (pm != null) {
-                out.set(new ArrayList<>(Arrays.asList(pm.getAllOpenPrograms())));
-            } else {
-                Program p = activeProgram();
-                if (p != null) out.set(new ArrayList<>(List.of(p)));
+            List<OpenProgram> all = new ArrayList<>();
+            Set<Program> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (GhidraMCPPlugin inst : instances) {
+                List<Program> progs;
+                try {
+                    progs = inst.programsInOwnTool();
+                } catch (RuntimeException e) {
+                    continue; // that window is mid-dispose
+                }
+                for (Program p : progs) {
+                    if (p != null && seen.add(p)) all.add(new OpenProgram(p, inst));
+                }
             }
+            out.set(all);
         };
         if (SwingUtilities.isEventDispatchThread()) {
             read.run();
@@ -3572,6 +3691,26 @@ public class GhidraMCPPlugin extends Plugin {
             }
         }
         return out.get();
+    }
+
+    /**
+     * The plugin instance whose tool window has this program open, preferring the
+     * serving window. Use its tool for window-specific services (cursor, tabs,
+     * data type archives). Falls back to this instance.
+     */
+    private GhidraMCPPlugin hostFor(Program program) {
+        if (program == null) return this;
+        for (OpenProgram op : openPrograms()) {
+            if (op.program == program) return op.host;
+        }
+        return this;
+    }
+
+    private static String windowLabel(GhidraMCPPlugin inst) {
+        PluginTool t = inst.getTool();
+        String name = t.getName();
+        String instance = t.getInstanceName();
+        return (instance == null || instance.isEmpty()) ? name : name + instance;
     }
 
     private static String projectPath(Program p) {
@@ -3586,7 +3725,8 @@ public class GhidraMCPPlugin extends Plugin {
      * ambiguous (400), no match at all is 404.
      */
     private Program resolveProgram(String arg) throws ProgramResolutionException {
-        List<Program> open = openPrograms();
+        List<Program> open = new ArrayList<>();
+        for (OpenProgram op : openPrograms()) open.add(op.program);
         if (open.isEmpty()) {
             throw new ProgramResolutionException(404, "No programs are open; cannot resolve program=" + arg);
         }
@@ -3612,39 +3752,56 @@ public class GhidraMCPPlugin extends Plugin {
             + "\nOpen programs:\n" + listOpenPrograms());
     }
 
-    /** One line per open program: name, project path, language:compiler, (active). */
+    /**
+     * One line per open program in any GhidraMCP window: name, project path,
+     * language:compiler, then "(active)" for the serving window's front tab, or
+     * "(other window: NAME[, its active tab])" for programs open only elsewhere.
+     */
     private String listOpenPrograms() {
-        List<Program> open = openPrograms();
+        List<OpenProgram> open = openPrograms();
         if (open.isEmpty()) return "No programs are open";
-        Program active = activeProgram();
+        Map<GhidraMCPPlugin, Program> activeByHost = new IdentityHashMap<>();
         StringBuilder sb = new StringBuilder();
-        for (Program p : open) {
+        for (OpenProgram op : open) {
+            Program p = op.program;
+            Program hostActive = activeByHost.computeIfAbsent(op.host, GhidraMCPPlugin::activeProgram);
             if (sb.length() > 0) sb.append("\n");
             sb.append(p.getName())
               .append("\t").append(projectPath(p))
               .append("\t").append(p.getLanguageID().getIdAsString())
               .append(":").append(p.getCompilerSpec().getCompilerSpecID().getIdAsString());
-            if (p == active) sb.append("\t(active)");
+            if (op.host == this) {
+                if (p == hostActive) sb.append("\t(active)");
+            } else {
+                sb.append("\t(other window: ").append(windowLabel(op.host));
+                if (p == hostActive) sb.append(", its active tab");
+                sb.append(")");
+            }
         }
         return sb.toString();
     }
 
-    /** Bring an open program's tab to the front. */
+    /** Bring an open program's tab to the front, in whichever window has it. */
     private String switchTab(Program target) {
         AtomicReference<String> result = new AtomicReference<>("Failed to switch tab");
+        GhidraMCPPlugin host = hostFor(target);
         try {
             SwingUtilities.invokeAndWait(() -> {
-                ProgramManager pm = tool.getService(ProgramManager.class);
+                ProgramManager pm = host.getTool().getService(ProgramManager.class);
                 if (pm == null) {
                     result.set("ProgramManager service not available");
                     return;
                 }
                 pm.setCurrentProgram(target);
                 Program now = pm.getCurrentProgram();
+                String where = host == this ? ""
+                    : " in other window " + windowLabel(host)
+                        + " (the default program= is still the serving window's active tab;"
+                        + " pass program=... to read that window's cursor)";
                 result.set(now == target
-                    ? "Active tab is now " + target.getName() + " (" + projectPath(target) + ")"
+                    ? "Active tab is now " + target.getName() + " (" + projectPath(target) + ")" + where
                     : "Requested " + projectPath(target) + " but the active tab is "
-                        + (now == null ? "none" : projectPath(now)));
+                        + (now == null ? "none" : projectPath(now)) + where);
             });
         } catch (InterruptedException | InvocationTargetException e) {
             result.set("Thread error: " + e.getMessage());
@@ -3652,10 +3809,19 @@ public class GhidraMCPPlugin extends Plugin {
         return result.get();
     }
 
-    /** True when the request named a program that is not the active tab. */
-    private boolean requestTargetsBackgroundProgram() {
+    /**
+     * The window a cursor-reading request should look at: the one hosting the
+     * requested program, or this (serving) window when no program=... was given.
+     */
+    private GhidraMCPPlugin cursorHost() {
         Program requested = requestProgram.get();
-        return requested != null && requested != activeProgram();
+        return requested == null ? this : hostFor(requested);
+    }
+
+    /** True when the request named a program that is not its window's active tab. */
+    private boolean requestTargetsBackgroundProgram(GhidraMCPPlugin host) {
+        Program requested = requestProgram.get();
+        return requested != null && requested != host.activeProgram();
     }
 
     /**
@@ -3831,16 +3997,40 @@ public class GhidraMCPPlugin extends Plugin {
 
     @Override
     public void dispose() {
+        HttpServer old;
+        int port;
+        synchronized (REGISTRY_LOCK) {
+            disposed = true;
+            LIVE.remove(this);
+            if (retryTask != null) {
+                retryTask.cancel(false);
+                retryTask = null;
+            }
+            old = server;
+            server = null;
+            port = boundPort;
+            // PORT_OWNERS keeps pointing at us until the socket is closed, so no
+            // other instance races a bind against a port that is still held.
+        }
+        bindRetryExecutor.shutdownNow();
         saveRetryExecutor.shutdownNow();
         if (!pendingSaves.isEmpty()) {
             Msg.warn(this, "Plugin disposed with deferred saves pending for: " + pendingSaves.keySet());
             pendingSaves.clear();
         }
-        if (server != null) {
+        if (old != null) {
             Msg.info(this, "Stopping GhidraMCP HTTP server...");
-            server.stop(1); // Stop with a small delay (e.g., 1 second) for connections to finish
-            server = null; // Nullify the reference
+            old.stop(1); // Stop with a small delay (e.g., 1 second) for connections to finish
             Msg.info(this, "GhidraMCP HTTP server stopped.");
+            List<GhidraMCPPlugin> successors;
+            synchronized (REGISTRY_LOCK) {
+                if (PORT_OWNERS.get(port) == this) PORT_OWNERS.remove(port);
+                successors = new ArrayList<>(LIVE);
+            }
+            // Direct handoff: poke every waiting window (oldest first) to bind now;
+            // REGISTRY_LOCK and PORT_OWNERS let exactly one win. Polling stays as
+            // the fallback if the port is not free yet.
+            for (GhidraMCPPlugin next : successors) next.requestImmediateBind();
         }
         super.dispose();
     }
